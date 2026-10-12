@@ -34,6 +34,7 @@ type Status struct {
 	DefaultModelID                string                   `json:"default_model_id,omitempty"`
 	DefaultEffort                 string                   `json:"default_effort,omitempty"`
 	DefaultFastService            string                   `json:"default_fast_service,omitempty"`
+	LastUsed                      bool                     `json:"last_used,omitempty"`
 	LastConfigSelection           any                      `json:"last_config_selection,omitempty"`
 	SupportsAPIProviderSwitch     bool                     `json:"supports_api_provider_switch"`
 	SupportedAPIProviderProtocols []string                 `json:"supported_api_provider_protocols,omitempty"`

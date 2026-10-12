@@ -17,6 +17,7 @@ export type AgentStatus = {
   default_model_id?: string;
   default_effort?: string;
   default_fast_service?: string;
+  last_used?: boolean;
   last_config_selection?: AgentLastConfigSelection;
   supports_api_provider_switch?: boolean;
   supported_api_provider_protocols?: string[];
