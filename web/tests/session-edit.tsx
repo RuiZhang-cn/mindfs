@@ -3,6 +3,9 @@ import { createRoot } from "react-dom/client";
 import { SessionViewer } from "../src/components/SessionViewer";
 import { I18nProvider } from "../src/i18n";
 import { sessionService } from "../src/services/session";
+import { BottomSheet } from "../src/components/BottomSheet";
+import { AppShell } from "../src/layout/AppShell";
+import "../src/index.css";
 
 const original = { key: "edit-check", type: "chat", name: "Edit check", exchanges: [
   {seq:1, role:"user", content:"Earlier message", timestamp:"2026-10-09T00:00:00Z"},
@@ -21,6 +24,12 @@ function Check() {
   };
   controls.streaming = () => setSession({...original, pending:true, exchanges:[...original.exchanges.slice(0,2), {...original.exchanges[2], seq:0}]});
   controls.task = () => setSession({...original, task_id:"edit-task"});
+  if (new URLSearchParams(location.search).has("drawer")) {
+    return <I18nProvider><AppShell sidebar={null} main={null} leftOpen={false} rightOpen={false}
+      footer={<div style={{height: 64}}>Composer</div>}
+      drawer={<BottomSheet isOpen onClose={() => {}}><SessionViewer session={session} rootId="test" interactionMode="drawer" /></BottomSheet>} />
+    </I18nProvider>;
+  }
   return <I18nProvider><div style={{height:"100vh", display:"flex", flexDirection:"column", fontFamily:"sans-serif", background:"#fff", color:"#222"}}>
     <output>{copied}</output><SessionViewer session={session} rootId="test" onEditUserMessage={setCopied}/>
   </div></I18nProvider>;
