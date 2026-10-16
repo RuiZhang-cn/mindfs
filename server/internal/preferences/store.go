@@ -25,6 +25,7 @@ type Store struct {
 }
 
 type UserPreferences struct {
+	AgentPinnedModels               map[string][]string      `json:"agent_pinned_models,omitempty"`
 	LauncherNodes                   []LauncherNode           `json:"launcher_nodes,omitempty"`
 	Agents                          map[string]AgentDefaults `json:"agents,omitempty"`
 	LastAgent                       string                   `json:"last_agent,omitempty"`
@@ -317,11 +318,12 @@ func (s *Store) ApplyAgentDefaults(statuses []agent.Status) []agent.Status {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if len(s.data.Agents) == 0 && s.data.LastAgent == "" {
+	if len(s.data.Agents) == 0 && s.data.LastAgent == "" && len(s.data.AgentPinnedModels) == 0 {
 		return statuses
 	}
 	out := append([]agent.Status(nil), statuses...)
 	for i := range out {
+		out[i].PinnedModels = append([]string{}, s.data.AgentPinnedModels[strings.TrimSpace(out[i].Name)]...)
 		out[i].LastUsed = s.data.LastAgent == strings.TrimSpace(out[i].Name)
 		defaults := s.data.Agents[strings.TrimSpace(out[i].Name)]
 		if defaults.Model != "" {

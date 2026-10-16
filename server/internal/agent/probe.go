@@ -20,6 +20,7 @@ import (
 )
 
 type Status struct {
+	PinnedModels                  []string                 `json:"pinned_models,omitempty"`
 	Name                          string                   `json:"name"`
 	Protocol                      Protocol                 `json:"protocol,omitempty"`
 	Installed                     bool                     `json:"installed"`
