@@ -11619,6 +11619,10 @@ export function App({ onGoHome }: AppProps) {
   const sessionView = (
     <SessionViewer
       session={selectedSessionSnapshot}
+      onRenameSession={selectedSessionSnapshot ? (name) => handleRenameSession(selectedSessionSnapshot, name) : undefined}
+      onDeleteSession={selectedSessionSnapshot ? () => void handleDeleteSession(selectedSessionSnapshot) : undefined}
+      onHandoffPack={selectedSessionSnapshot ? () => handleHandoffPack(selectedSessionSnapshot) : undefined}
+      onScheduledTask={selectedSessionSnapshot ? () => openSessionScheduledTask(selectedSessionSnapshot) : undefined}
       agents={availableAgents}
       slashCommandResult={slashCommandResultForSession(
         selectedSession?.root_id || currentRootId,

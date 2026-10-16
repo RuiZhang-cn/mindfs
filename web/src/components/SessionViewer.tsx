@@ -11,13 +11,13 @@ import { fetchProofProtectedBlob } from "../services/file";
 import type { ExchangeAux, RelatedFile, TokenUsage, ToolCall } from "../services/session";
 import { savePrompt } from "../services/prompts";
 import { reportError } from "../services/error";
-import { rootBadgeButtonStyle } from "./rootBadgeStyle";
 import { copyText } from "../services/clipboard";
 import type { AgentStatus } from "../services/agents";
 import { useI18n, type Locale } from "../i18n";
 import { formatSessionDuration } from "../services/sessionDuration";
 import { DEFAULT_REPLY_INFO_PREFERENCES, useReplyInfoPreferences } from "../services/replyInfoPreferences";
 import { ReplyInfoMenu } from "./ReplyInfoMenu";
+import { SessionHeader, type SessionHeaderActions } from "./SessionHeader";
 import {
   relatedFileStatKey,
   useRelatedFileStats,
@@ -58,7 +58,7 @@ type SessionItem = {
   exchange_aux?: Record<string, ExchangeAux[]>;
 };
 
-type SessionViewerProps = {
+type SessionViewerProps = SessionHeaderActions & {
   session: SessionItem | null;
   loading?: boolean;
   slashCommandResult?: {
@@ -1070,6 +1070,10 @@ function SessionViewerInner({
   onForkAgentMessage,
   agents,
   composerOverlayInset = 0,
+  onRenameSession,
+  onDeleteSession,
+  onHandoffPack,
+  onScheduledTask,
 }: SessionViewerProps) {
   const { locale, t } = useI18n();
   const [relatedFilesCollapsed, setRelatedFilesCollapsed] = useState(false);
@@ -1098,6 +1102,31 @@ function SessionViewerInner({
   const [editingMessage, setEditingMessage] = useState<{ seq: number; original: string; timestamp: string; content: string } | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState("");
+  const editSubmitting = useRef(false);
+  const editVersion = useRef(0);
+  const editComposing = useRef(false);
+  useEffect(() => {
+    ++editVersion.current;
+    editSubmitting.current = false;
+    editComposing.current = false;
+    setSavingEdit(false);
+    return () => { ++editVersion.current; };
+  }, [rootId, sessionKey]);
+  const submitEdit = async () => {
+    if (!rootId || !sessionKey || !editingMessage?.content.trim() || editSubmitting.current) return;
+    const version = editVersion.current;
+    editSubmitting.current = true;
+    setSavingEdit(true);
+    setEditError("");
+    try {
+      await sessionService.editMessage(rootId, sessionKey, editingMessage.seq, editingMessage.content, editingMessage.original, editingMessage.timestamp);
+      if (version === editVersion.current) setEditingMessage(null);
+    } catch (error) {
+      if (version === editVersion.current) setEditError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (version === editVersion.current) { editSubmitting.current = false; setSavingEdit(false); }
+    }
+  };
   useEffect(() => { setEditingMessage(null); setEditError(""); }, [rootId, sessionKey]);
   const exchanges = Array.isArray(session?.exchanges) ? session.exchanges : [];
   const isAwaiting = !!(session as any)?.pending;
@@ -2051,19 +2080,18 @@ function SessionViewerInner({
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 <textarea autoFocus aria-label={t("session.editMessage")} value={editingMessage.content} disabled={savingEdit}
                   onChange={(event) => setEditingMessage({ ...editingMessage, content: event.target.value })}
+                  onCompositionStart={() => { editComposing.current = true; }}
+                  onCompositionEnd={() => { editComposing.current = false; }}
+                  onKeyDown={(event) => {
+                    if (editComposing.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+                    if (event.key === "Escape" && !editSubmitting.current) { event.preventDefault(); setEditingMessage(null); }
+                    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitEdit(); }
+                  }}
                   rows={3} style={{ width: "100%", boxSizing: "border-box", resize: "vertical", padding: "10px 16px", border: "1px solid var(--border-color, #d1d5db)", borderRadius: "18px 18px 4px 18px", font: "inherit", fontSize: 14, lineHeight: 1.5, color: "var(--text-primary)", background: "rgba(148,163,184,0.14)" }} />
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   <span style={{ flex: "1 1 auto", minWidth: 0, fontSize: 11, lineHeight: 1.5, color: "var(--text-secondary, #64748b)" }}><svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" style={{ verticalAlign: "-2px", marginRight: 4 }}><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7v1" /></svg>{t("session.editNotice")}</span>
                   <button type="button" disabled={savingEdit} style={{ flexShrink: 0, padding: "2px 8px", fontSize: 12, lineHeight: "16px", borderRadius: 5, border: "1px solid var(--border-color, #d1d5db)", background: "transparent", color: "var(--text-primary)" }} onClick={() => setEditingMessage(null)}>{t("common.cancel")}</button>
-                  <button type="button" disabled={savingEdit || !editingMessage.content.trim()} style={{ flexShrink: 0, padding: "2px 8px", fontSize: 12, lineHeight: "16px", borderRadius: 5, border: "1px solid transparent", background: "#2563eb", color: "white", opacity: savingEdit || !editingMessage.content.trim() ? 0.5 : 1 }} onClick={async () => {
-                    if (!rootId || !sessionKey) return;
-                    setSavingEdit(true); setEditError("");
-                    try {
-                      await sessionService.editMessage(rootId, sessionKey, editingMessage.seq, editingMessage.content, editingMessage.original, editingMessage.timestamp);
-                      setEditingMessage(null);
-                    } catch (error) { setEditError(error instanceof Error ? error.message : String(error)); }
-                    finally { setSavingEdit(false); }
-                  }}>{t(savingEdit ? "session.editSaving" : "session.editRegenerate")}</button>
+                  <button type="button" disabled={savingEdit || !editingMessage.content.trim()} style={{ flexShrink: 0, padding: "2px 8px", fontSize: 12, lineHeight: "16px", borderRadius: 5, border: "1px solid transparent", background: "#2563eb", color: "white", opacity: savingEdit || !editingMessage.content.trim() ? 0.5 : 1 }} onClick={() => void submitEdit()}>{t(savingEdit ? "session.editSaving" : "session.editRegenerate")}</button>
                 </div>
                 {editError && <span role="alert" style={{ fontSize: 12, color: "var(--text-danger, #dc2626)" }}>{editError}</span>}
               </div>
@@ -2660,55 +2688,19 @@ function SessionViewerInner({
       }}
     >
       {interactionMode === "drawer" ? null : (
-        <header
-          style={{
-            height: "36px",
-            padding: "0 16px",
-            borderBottom: "1px solid var(--border-color)",
-            display: "flex",
-            alignItems: "center",
-            background: "var(--mindfs-topbar-bg, transparent)",
-            boxSizing: "border-box",
-            zIndex: 10,
-            flexShrink: 0,
-          }}
-        >
-          <h1
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              fontSize: "14px",
-              fontWeight: 600,
-              margin: 0,
-              minWidth: 0,
-            }}
-          >
-            {rootId ? (
-              <button
-                type="button"
-                onClick={() => onRootClick?.(rootId)}
-                style={{
-                  ...rootBadgeButtonStyle,
-                  flexShrink: 0,
-                  cursor: onRootClick ? "pointer" : "default",
-                }}
-              >
-                {rootId}
-              </button>
-            ) : null}
-            <span
-              style={{
-                minWidth: 0,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {displayName}
-            </span>
-          </h1>
-        </header>
+        <SessionHeader
+          key={`${rootId || ""}:${sessionKey || ""}`}
+          title={displayName}
+          sessionKey={sessionKey || ""}
+          rootId={rootId}
+          pending={isAwaiting}
+          chat={!session.type || session.type === "chat"}
+          onRootClick={onRootClick}
+          onRenameSession={onRenameSession}
+          onDeleteSession={onDeleteSession}
+          onHandoffPack={onHandoffPack}
+          onScheduledTask={onScheduledTask}
+        />
       )}
 
       {/* 滚动容器 */}
@@ -3320,5 +3312,9 @@ export const SessionViewer = memo(
     prev.targetSeqRequestKey === next.targetSeqRequestKey &&
     prev.composerOverlayInset === next.composerOverlayInset &&
     prev.gitFileStatsByPath === next.gitFileStatsByPath &&
-    prev.onRootClick === next.onRootClick,
+    prev.onRootClick === next.onRootClick &&
+    prev.onRenameSession === next.onRenameSession &&
+    prev.onDeleteSession === next.onDeleteSession &&
+    prev.onHandoffPack === next.onHandoffPack &&
+    prev.onScheduledTask === next.onScheduledTask,
 );
