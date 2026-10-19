@@ -29,6 +29,7 @@ Access your personal AI agents and workstation data anywhere, anytime through Mi
 - **Session search**: Search by session title or conversation content, then jump straight to the matched session and snippet.
 - **External session both-way import&synchronization**: Browse existing sessions from supported agent CLIs, import one into MindFS, and continue it as a native MindFS session. MindFS session can resumed in agent cli too. Bidirectional synchronization is also possible.
 - **Binding persistence and recovery**: MindFS persists the mapping between its internal session and the underlying agent session, so the link can be restored after service restarts and follow-up messages continue on the same agent session when available.
+- **OMP title synchronization**: Reuse MindFS titles in exactly bound OMP sessions through the optional native metadata capability, without another model call or a chat prompt. Backfill unnamed native sessions from the import menu.
 - **Rich media input**: Attach files and images directly in your messages.
 - **Multi-device sync**: Access the same instance from multiple devices simultaneously with live session sync.
 - **Configuration Management & Switching**: Agents configurations / API providers can be backup / added and switched with one click, making it easier to move between multiple accounts or API keys.
@@ -239,6 +240,26 @@ mindfs -agent-config /path/to/agents.json
 ```
 
 The extra file can add new agents or override a bundled definition with the same `name`.
+
+### OMP Session Titles
+
+OMP ACP sessions can be unnamed even when their MindFS conversation has a title. If OMP advertises `agentCapabilities._meta["omp.sessionTitle"]`, MindFS synchronizes its existing title after naming and native-session binding changes. Synchronization itself never sends a chat prompt or invokes a title model.
+
+- Automatic synchronization fills empty native titles or updates the last title acknowledged for that exact binding. Native user titles and independently changed titles are preserved.
+- An explicit rename in MindFS also renames the bound native session as a user action. A native failure does not undo the saved MindFS name; the response includes `title_sync` with its outcome.
+- To backfill existing sessions, open **Import external sessions**, choose **OMP**, reopen the agent dropdown, then choose **Sync existing titles to OMP**. Only persisted bindings are used; unbound history is never matched by title or time.
+- The result reports updated, unchanged, kept, conflicted, busy, missing, unsupported, and failed targets separately. Native metadata failures are reported independently and do not turn a successful chat, fork, or history edit into a failure.
+
+The same backfill is available through the local API:
+
+```http
+POST /api/sessions/titles/sync
+Content-Type: application/json
+
+{"root_id":"<root-id>","agent":"omp"}
+```
+
+OMP versions without this capability remain usable for chat, but report title synchronization as unsupported. MindFS does not fall back to `/rename`, opening a chat session, or editing native journal files. Native IDs and working directories are resolved from actual bindings and native metadata; ambiguous targets are skipped rather than guessed.
 
 ### CLI Reference
 

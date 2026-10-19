@@ -1094,7 +1094,12 @@ type RenameSessionInput struct {
 	Name   string
 }
 
-func (s *Service) RenameSession(ctx context.Context, in RenameSessionInput) (*session.Session, error) {
+type RenameSessionOutput struct {
+	Session   *session.Session
+	TitleSync *TitleSyncResult
+}
+
+func (s *Service) RenameSession(ctx context.Context, in RenameSessionInput) (*RenameSessionOutput, error) {
 	if err := s.ensureRegistry(); err != nil {
 		return nil, err
 	}
@@ -1102,7 +1107,22 @@ func (s *Service) RenameSession(ctx context.Context, in RenameSessionInput) (*se
 	if err != nil {
 		return nil, err
 	}
-	return manager.Rename(ctx, in.Key, in.Name)
+	renamed, err := manager.Rename(ctx, in.Key, in.Name)
+	if err != nil {
+		return nil, err
+	}
+	out := &RenameSessionOutput{Session: renamed}
+	meta, err := manager.GetTitleMetadata(ctx, in.Key)
+	if err != nil {
+		out.TitleSync = &TitleSyncResult{SessionKey: in.Key, Status: "failed", Error: err.Error()}
+		return out, nil
+	}
+	_, isOMP := renamed.AgentCtxSeq["omp"]
+	if titleBinding(meta) != nil || isOMP {
+		result := s.SyncSessionTitle(ctx, in.RootID, in.Key, "user")
+		out.TitleSync = &result
+	}
+	return out, nil
 }
 
 type PinSessionInput struct {
@@ -1503,7 +1523,7 @@ func (s *Service) SuggestSessionName(ctx context.Context, in SuggestSessionNameI
 	if err != nil {
 		return nil, err
 	}
-	current, err := manager.Get(ctx, in.SessionKey, 0)
+	current, err := manager.GetTitleMetadata(ctx, in.SessionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1534,11 +1554,15 @@ func (s *Service) SuggestSessionName(ctx context.Context, in SuggestSessionNameI
 	if name == "" || name == fallback {
 		return nil, nil
 	}
-	renamed, err := manager.Rename(ctx, in.SessionKey, name)
+	renamed, err := manager.RenameIfRevision(ctx, in.SessionKey, name, current.NameRevision)
 	if err != nil {
 		log.Printf("[session-name] rename.error root=%s session=%s err=%v", in.RootID, in.SessionKey, err)
 		return nil, err
 	}
+	if renamed == nil {
+		return nil, nil
+	}
+	s.SyncSessionTitleAutomatic(ctx, in.RootID, in.SessionKey)
 	log.Printf("[session-name] rename.done root=%s session=%s name=%q", in.RootID, in.SessionKey, renamed.Name)
 	return renamed, nil
 }

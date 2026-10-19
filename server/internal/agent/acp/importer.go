@@ -172,12 +172,17 @@ func (i *Importer) ImportExternalSession(ctx context.Context, in agenttypes.Impo
 }
 
 func (i *Importer) openProcess(ctx context.Context, rootPath string) (*Process, string, error) {
-	if strings.TrimSpace(i.command) == "" {
-		return nil, "", errors.New("agent command required")
-	}
 	cwd := strings.TrimSpace(rootPath)
 	if i.resolveCwd != nil {
 		cwd = strings.TrimSpace(i.resolveCwd(rootPath))
+	}
+	return i.openProcessAtCwd(ctx, cwd)
+}
+
+// openProcessAtCwd bypasses template resolution for already-proven native cwd.
+func (i *Importer) openProcessAtCwd(ctx context.Context, cwd string) (*Process, string, error) {
+	if strings.TrimSpace(i.command) == "" {
+		return nil, "", errors.New("agent command required")
 	}
 	if cwd == "" {
 		return nil, "", errors.New("root path required")

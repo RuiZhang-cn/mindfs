@@ -362,6 +362,7 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Get("/api/sessions/{key}/related-files", h.protectedEndpoint(h.handleSessionRelatedFilesGet))
 	r.Post("/api/sessions/{key}/pin", h.protectedEndpoint(h.handleSessionPin))
 	r.Post("/api/sessions/{key}/rename", h.protectedEndpoint(h.handleSessionRename))
+	r.Post("/api/sessions/titles/sync", h.protectedEndpoint(h.handleSessionTitlesSync))
 	r.Delete("/api/sessions/{key}/related-files", h.protectedEndpoint(h.handleSessionRelatedFilesDelete))
 	r.Delete("/api/sessions/{key}", h.protectedEndpoint(h.handleSessionDelete))
 	r.Get("/api/scheduled-agent-tasks", h.protectedEndpoint(h.handleScheduledAgentTasksList))
@@ -1085,7 +1086,7 @@ func (h *HTTPHandler) handleSessionRename(w http.ResponseWriter, r *http.Request
 		return
 	}
 	uc := h.service()
-	renamed, err := uc.RenameSession(r.Context(), usecase.RenameSessionInput{
+	out, err := uc.RenameSession(r.Context(), usecase.RenameSessionInput{
 		RootID: rootID,
 		Key:    key,
 		Name:   req.Name,
@@ -1094,6 +1095,7 @@ func (h *HTTPHandler) handleSessionRename(w http.ResponseWriter, r *http.Request
 		respondError(w, http.StatusBadRequest, err)
 		return
 	}
+	renamed := out.Session
 	if h.AppContext != nil {
 		h.AppContext.GetSessionStreamHub().BroadcastAll(WSResponse{
 			Type: "session.meta.updated",
@@ -1113,7 +1115,11 @@ func (h *HTTPHandler) handleSessionRename(w http.ResponseWriter, r *http.Request
 			},
 		})
 	}
-	respondJSON(w, http.StatusOK, h.sessionListResponse(renamed))
+	payload := h.sessionListResponse(renamed)
+	if out.TitleSync != nil {
+		payload["title_sync"] = out.TitleSync
+	}
+	respondJSON(w, http.StatusOK, payload)
 }
 
 func (h *HTTPHandler) handleSessionPin(w http.ResponseWriter, r *http.Request) {

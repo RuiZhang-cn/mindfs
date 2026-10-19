@@ -97,6 +97,25 @@ export type ExchangeAux = {
   compact?: CompactNotice | null;
 };
 
+export type SessionTitleSyncResult = {
+  session_key?: string;
+  agent_session_id?: string;
+  status: string;
+  error?: string;
+};
+
+export type SessionTitleSyncBatchResult = {
+  results: SessionTitleSyncResult[];
+  updated: number;
+  unchanged: number;
+  kept: number;
+  conflict: number;
+  busy: number;
+  not_found: number;
+  unsupported: number;
+  failed: number;
+};
+
 export type Session = {
   key: string;
   history_revision?: number;
@@ -115,6 +134,7 @@ export type Session = {
   fast_service?: string;
   plan_mode?: boolean;
   name: string;
+  title_sync?: SessionTitleSyncResult;
   created_at: string;
   updated_at: string;
   closed_at?: string;
@@ -1463,6 +1483,21 @@ class SessionService {
       return data as Session;
     } catch (err) {
       console.error("[Session] Failed to rename session:", err);
+      return null;
+    }
+  }
+
+  async syncSessionTitles(rootId: string): Promise<SessionTitleSyncBatchResult | null> {
+    try {
+      return await protectedJSON<SessionTitleSyncBatchResult>(appURL("/api/sessions/titles/sync"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ root_id: rootId, agent: "omp" }),
+      });
+    } catch (err) {
+      console.error("[Session] Failed to synchronize session titles:", err);
       return null;
     }
   }

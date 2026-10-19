@@ -32,7 +32,7 @@ const (
 	exchangeFileTpl  = "sessions/%s.jsonl"
 	auxFileTpl       = "sessions/%s.aux.jsonl"
 	selectSessionSQL = `
-	SELECT key, type, parent_session_key, parent_tool_call_id, source, task_id, model, shell, plan_mode, name, related_files_json, related_worktree_json, last_context_window_total_tokens, last_context_window_model_context_window, pinned_at, created_at, updated_at, closed_at, history_revision
+	SELECT key, type, parent_session_key, parent_tool_call_id, source, task_id, model, shell, plan_mode, name, related_files_json, related_worktree_json, last_context_window_total_tokens, last_context_window_model_context_window, pinned_at, created_at, updated_at, closed_at, history_revision, name_revision
 	FROM sessions`
 	deleteSessionSQL = `
 DELETE FROM sessions
@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS session_agent_bindings (
 	external_source_path TEXT NOT NULL DEFAULT '',
 	external_source_offset INTEGER NOT NULL DEFAULT 0,
 	external_source_mtime_ns INTEGER NOT NULL DEFAULT 0,
+	native_title TEXT,
+	native_cwd TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY (session_key, agent)
 );`
 	upsertAgentBindingSQL = `
@@ -100,17 +102,19 @@ INSERT INTO session_agent_bindings (
 ) VALUES (?, ?, ?, ?)
 ON CONFLICT(session_key, agent) DO UPDATE SET
 	agent_session_id = excluded.agent_session_id,
-	agent_ctx_seq = excluded.agent_ctx_seq`
+	agent_ctx_seq = excluded.agent_ctx_seq,
+	native_title = CASE WHEN session_agent_bindings.agent_session_id = excluded.agent_session_id THEN session_agent_bindings.native_title ELSE NULL END,
+	native_cwd = CASE WHEN session_agent_bindings.agent_session_id = excluded.agent_session_id THEN session_agent_bindings.native_cwd ELSE '' END`
 	selectAgentBindingSQL = `
-SELECT session_key, agent, agent_session_id, agent_ctx_seq, external_source_path, external_source_offset, external_source_mtime_ns
+SELECT session_key, agent, agent_session_id, agent_ctx_seq, external_source_path, external_source_offset, external_source_mtime_ns, native_title, native_cwd
 FROM session_agent_bindings
 WHERE session_key = ? AND agent = ?`
 	selectAgentBindingsBySessionSQL = `
-SELECT session_key, agent, agent_session_id, agent_ctx_seq, external_source_path, external_source_offset, external_source_mtime_ns
+SELECT session_key, agent, agent_session_id, agent_ctx_seq, external_source_path, external_source_offset, external_source_mtime_ns, native_title, native_cwd
 FROM session_agent_bindings
 WHERE session_key = ?`
 	selectBindingByAgentSessionSQL = `
-SELECT session_key, agent, agent_session_id, agent_ctx_seq, external_source_path, external_source_offset, external_source_mtime_ns
+SELECT session_key, agent, agent_session_id, agent_ctx_seq, external_source_path, external_source_offset, external_source_mtime_ns, native_title, native_cwd
 FROM session_agent_bindings
 WHERE agent = ? AND agent_session_id = ?
 LIMIT 1`
@@ -129,6 +133,8 @@ type Manager struct {
 	sessions         map[string]*Session
 	pendingToolCalls map[string]map[string]agenttypes.ToolCall
 	now              func() time.Time
+	titleLocks       sync.Map
+	titleSync        func(context.Context, string, string)
 }
 
 type CreateInput struct {
@@ -146,13 +152,15 @@ type CreateInput struct {
 }
 
 type AgentBinding struct {
-	SessionKey            string `json:"session_key"`
-	Agent                 string `json:"agent"`
-	AgentSessionID        string `json:"agent_session_id"`
-	AgentCtxSeq           int    `json:"agent_ctx_seq"`
-	ExternalSourcePath    string `json:"external_source_path,omitempty"`
-	ExternalSourceOffset  int64  `json:"external_source_offset,omitempty"`
-	ExternalSourceMtimeNS int64  `json:"external_source_mtime_ns,omitempty"`
+	SessionKey            string  `json:"session_key"`
+	Agent                 string  `json:"agent"`
+	AgentSessionID        string  `json:"agent_session_id"`
+	AgentCtxSeq           int     `json:"agent_ctx_seq"`
+	ExternalSourcePath    string  `json:"external_source_path,omitempty"`
+	ExternalSourceOffset  int64   `json:"external_source_offset,omitempty"`
+	ExternalSourceMtimeNS int64   `json:"external_source_mtime_ns,omitempty"`
+	NativeTitle           *string `json:"native_title,omitempty"`
+	NativeCwd             string  `json:"native_cwd,omitempty"`
 }
 
 func (b AgentBinding) ExternalCursor() agenttypes.ExternalSessionCursor {
@@ -224,6 +232,9 @@ func (m *Manager) Create(_ context.Context, input CreateInput) (*Session, error)
 		UpdatedAt:        now,
 	}
 
+	lock := m.titleLock(key)
+	lock.Lock()
+	defer lock.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.createSessionUnsafe(session); err != nil {
@@ -710,6 +721,9 @@ func (m *Manager) RecordRelatedWorktree(_ context.Context, key, rootID, path, br
 	if !filepath.IsAbs(path) {
 		return false, errors.New("worktree path must be absolute")
 	}
+	lock := m.titleLock(key)
+	lock.Lock()
+	defer lock.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	session, err := m.getSessionUnsafe(key, 0)
@@ -732,15 +746,26 @@ func (m *Manager) RecordRelatedWorktree(_ context.Context, key, rootID, path, br
 	return true, nil
 }
 
-func (m *Manager) UpdateAgentState(_ context.Context, session *Session, agent string, lastCtxSeq int, agentSessionID string) error {
+func (m *Manager) UpdateAgentState(ctx context.Context, session *Session, agent string, lastCtxSeq int, agentSessionID string) (retErr error) {
 	if session == nil || strings.TrimSpace(session.Key) == "" {
 		return errors.New("session required")
 	}
 	if strings.TrimSpace(agent) == "" {
 		return errors.New("agent required")
 	}
+	key := strings.TrimSpace(session.Key)
+	agent = strings.TrimSpace(agent)
+	lock := m.titleLock(key)
+	lock.Lock()
+	changed := false
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		lock.Unlock()
+		if retErr == nil && changed {
+			m.notifyTitleSync(ctx, key, agent)
+		}
+	}()
 	current, err := m.getSessionUnsafe(session.Key, 0)
 	if err != nil {
 		return err
@@ -755,15 +780,16 @@ func (m *Manager) UpdateAgentState(_ context.Context, session *Session, agent st
 	if strings.TrimSpace(agentSessionID) == "" {
 		return nil
 	}
-	return m.upsertAgentBindingUnsafe(AgentBinding{
-		SessionKey:     strings.TrimSpace(session.Key),
-		Agent:          strings.TrimSpace(agent),
+	changed, retErr = m.upsertAgentBindingUnsafe(AgentBinding{
+		SessionKey:     key,
+		Agent:          agent,
 		AgentSessionID: strings.TrimSpace(agentSessionID),
 		AgentCtxSeq:    lastCtxSeq,
 	})
+	return retErr
 }
 
-func (m *Manager) UpsertAgentBinding(_ context.Context, binding AgentBinding) error {
+func (m *Manager) UpsertAgentBinding(ctx context.Context, binding AgentBinding) (retErr error) {
 	if strings.TrimSpace(binding.SessionKey) == "" {
 		return errors.New("session key required")
 	}
@@ -773,9 +799,22 @@ func (m *Manager) UpsertAgentBinding(_ context.Context, binding AgentBinding) er
 	if strings.TrimSpace(binding.AgentSessionID) == "" {
 		return errors.New("agent session id required")
 	}
+	binding.SessionKey = strings.TrimSpace(binding.SessionKey)
+	binding.Agent = strings.TrimSpace(binding.Agent)
+	binding.AgentSessionID = strings.TrimSpace(binding.AgentSessionID)
+	lock := m.titleLock(binding.SessionKey)
+	lock.Lock()
+	changed := false
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.upsertAgentBindingUnsafe(binding)
+	defer func() {
+		m.mu.Unlock()
+		lock.Unlock()
+		if retErr == nil && changed {
+			m.notifyTitleSync(ctx, binding.SessionKey, binding.Agent)
+		}
+	}()
+	changed, retErr = m.upsertAgentBindingUnsafe(binding)
+	return retErr
 }
 
 func (m *Manager) UpdateExternalSessionCursor(_ context.Context, sessionKey, agent string, cursor agenttypes.ExternalSessionCursor) error {
@@ -885,13 +924,18 @@ func (m *Manager) listAgentBindingsUnsafe(sessionKey string) ([]AgentBinding, er
 }
 
 func scanAgentBinding(scanner rowScanner, binding *AgentBinding) error {
-	return scanner.Scan(&binding.SessionKey, &binding.Agent, &binding.AgentSessionID, &binding.AgentCtxSeq, &binding.ExternalSourcePath, &binding.ExternalSourceOffset, &binding.ExternalSourceMtimeNS)
+	return scanner.Scan(&binding.SessionKey, &binding.Agent, &binding.AgentSessionID, &binding.AgentCtxSeq, &binding.ExternalSourcePath, &binding.ExternalSourceOffset, &binding.ExternalSourceMtimeNS, &binding.NativeTitle, &binding.NativeCwd)
 }
 
-func (m *Manager) upsertAgentBindingUnsafe(binding AgentBinding) error {
+func (m *Manager) upsertAgentBindingUnsafe(binding AgentBinding) (bool, error) {
 	db, err := m.ensureSessionMetaDBUnsafe()
 	if err != nil {
-		return err
+		return false, err
+	}
+	var previousID string
+	err = db.QueryRow("SELECT agent_session_id FROM session_agent_bindings WHERE session_key = ? AND agent = ?", binding.SessionKey, binding.Agent).Scan(&previousID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
 	}
 	agentCtxSeq := 0
 	if binding.AgentCtxSeq > 0 {
@@ -904,7 +948,7 @@ func (m *Manager) upsertAgentBindingUnsafe(binding AgentBinding) error {
 		strings.TrimSpace(binding.AgentSessionID),
 		agentCtxSeq,
 	)
-	return err
+	return previousID != strings.TrimSpace(binding.AgentSessionID), err
 }
 
 func (m *Manager) Close(ctx context.Context, key string) (*Session, error) {
@@ -914,31 +958,16 @@ func (m *Manager) Close(ctx context.Context, key string) (*Session, error) {
 }
 
 func (m *Manager) Delete(_ context.Context, key string) error {
+	lock := m.titleLock(key)
+	lock.Lock()
+	defer lock.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.deleteSessionUnsafe(key)
 }
 
-func (m *Manager) Rename(_ context.Context, key, name string) (*Session, error) {
-	trimmed := strings.TrimSpace(name)
-	if trimmed == "" {
-		return nil, errors.New("session name required")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	session, err := m.getSessionUnsafe(key, 0)
-	if err != nil {
-		return nil, err
-	}
-	if session.Name == trimmed {
-		return session, nil
-	}
-	session.Name = trimmed
-	session.UpdatedAt = m.now().UTC()
-	if err := m.upsertSessionMetaUnsafe(session); err != nil {
-		return nil, err
-	}
-	return session, nil
+func (m *Manager) Rename(ctx context.Context, key, name string) (*Session, error) {
+	return m.renameTitle(ctx, key, name, nil)
 }
 
 func (m *Manager) SetPinned(_ context.Context, key string, pinned bool) (*Session, error) {
@@ -1748,6 +1777,10 @@ func openSessionMetaDB(dbFile string) (db *sql.DB, err error) {
 		db.Close()
 		return nil, err
 	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS session_agent_native_identity ON session_agent_bindings(agent, agent_session_id)`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 		db.Close()
 		return nil, err
@@ -1763,6 +1796,9 @@ func openSessionMetaDB(dbFile string) (db *sql.DB, err error) {
 	for _, stmt := range []string{
 		`CREATE TABLE IF NOT EXISTS session_edit_journal (session_key TEXT PRIMARY KEY, history BLOB, auxiliary BLOB)`,
 		`ALTER TABLE sessions ADD COLUMN history_revision INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sessions ADD COLUMN name_revision INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE session_agent_bindings ADD COLUMN native_title TEXT`,
+		`ALTER TABLE session_agent_bindings ADD COLUMN native_cwd TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN parent_session_key TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN parent_tool_call_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN source TEXT NOT NULL DEFAULT ''`,
@@ -1908,6 +1944,7 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		updatedAtRaw        string
 		closedAtRaw         sql.NullString
 		historyRevision     int
+		nameRevision        int64
 	)
 	if err := scanner.Scan(
 		&key,
@@ -1929,11 +1966,13 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		&updatedAtRaw,
 		&closedAtRaw,
 		&historyRevision,
+		&nameRevision,
 	); err != nil {
 		return nil, err
 	}
 	session := &Session{
 		HistoryRevision:  historyRevision,
+		NameRevision:     nameRevision,
 		Key:              key,
 		Type:             typ,
 		ParentSessionKey: parentSessionKey,

@@ -1642,6 +1642,14 @@ export function App({ onGoHome }: AppProps) {
     useState<Set<string>>(() => new Set());
   const [confirmingExternalImport, setConfirmingExternalImport] =
     useState(false);
+  const [syncingSessionTitles, setSyncingSessionTitles] = useState(false);
+  const sessionTitleSyncInFlightRef = useRef(false);
+  const [sessionTitleSyncFeedback, setSessionTitleSyncFeedback] = useState<{
+    rootId: string;
+    message: string;
+    error: boolean;
+    unsupported?: boolean;
+  } | null>(null);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
   const importMenuRef = useRef<HTMLDivElement | null>(null);
   const projectAddPopoverRef = useRef<HTMLDivElement | null>(null);
@@ -5957,9 +5965,17 @@ export function App({ onGoHome }: AppProps) {
       );
 
       bumpCacheVersion();
+      const titleSync = renamed.title_sync;
+      if (titleSync && !["updated", "unchanged", "kept", "skipped"].includes(titleSync.status)) {
+        reportError("session.native_title_sync_failed", t("session.nativeTitleSyncFailed", {
+          reason: titleSync.status === "unsupported"
+            ? t("externalImport.syncTitlesUnsupported")
+            : titleSync.error || titleSync.status,
+        }));
+      }
       return true;
     },
-    [bumpCacheVersion, rootSessionKey, setDrawerSessionForRoot],
+    [bumpCacheVersion, rootSessionKey, setDrawerSessionForRoot, t],
   );
 
   const handlePinSession = useCallback(
@@ -6211,6 +6227,63 @@ export function App({ onGoHome }: AppProps) {
     },
     [externalFilterBound, mergeSessionItems],
   );
+
+  const handleSyncSessionTitles = useCallback(async () => {
+    const rootID = currentRootIdRef.current || "";
+    if (!rootID || sessionTitleSyncInFlightRef.current) return;
+    sessionTitleSyncInFlightRef.current = true;
+    setSyncingSessionTitles(true);
+    setSessionTitleSyncFeedback(null);
+    try {
+      const result = await sessionService.syncSessionTitles(rootID);
+      if (!result) throw new Error(t("externalImport.syncTitlesFailed"));
+      if (currentRootIdRef.current !== rootID || externalImportAgentRef.current !== "omp") return;
+      const summary = t("externalImport.syncTitlesSummary", {
+        updated: result.updated,
+        unchanged: result.unchanged,
+        kept: result.kept,
+        conflict: result.conflict,
+        busy: result.busy,
+        not_found: result.not_found,
+        unsupported: result.unsupported,
+        failed: result.failed,
+      });
+      const detail = result.results.find((item) => item.error)?.error;
+      setSessionTitleSyncFeedback((current) => ({
+        rootId: rootID,
+        message: [summary, detail].filter(Boolean).join(" "),
+        error: result.failed + result.unsupported + result.conflict + result.busy + result.not_found > 0,
+        unsupported: result.unsupported > 0 || !!(current && current.rootId === rootID && current.unsupported),
+      }));
+      const refreshed = await sessionService.fetchExternalSessions(rootID, "omp", {
+        filterBound: externalFilterBound,
+        limit: 50,
+      }).catch((err) => {
+        const message = t("externalImport.syncTitlesRefreshFailed", {
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        setSessionTitleSyncFeedback((current) => current?.rootId === rootID
+          ? { ...current, message: `${current.message} ${message}`, error: true }
+          : current);
+        return null;
+      });
+      if (refreshed && currentRootIdRef.current === rootID && externalImportAgentRef.current === "omp") {
+        setExternalSessions(refreshed as SessionItem[]);
+        setHasMoreExternalSessions(refreshed.length >= 50);
+      }
+    } catch (err) {
+      if (currentRootIdRef.current === rootID && externalImportAgentRef.current === "omp") {
+        setSessionTitleSyncFeedback({
+          rootId: rootID,
+          message: err instanceof Error ? err.message : t("externalImport.syncTitlesFailed"),
+          error: true,
+        });
+      }
+    } finally {
+      sessionTitleSyncInFlightRef.current = false;
+      setSyncingSessionTitles(false);
+    }
+  }, [externalFilterBound, t]);
 
   const exitImportMode = useCallback(() => {
     setSessionListMode("local");
@@ -10387,6 +10460,27 @@ export function App({ onGoHome }: AppProps) {
           }
           break;
         }
+        case "session.title_sync": {
+          const rootID = typeof payload?.root_id === "string" ? payload.root_id : "";
+          const status = typeof payload?.status === "string" ? payload.status : "";
+          if (!rootID || payload?.agent !== "omp") break;
+          if (status === "unsupported" && rootID === currentRootIdRef.current) {
+            setSessionTitleSyncFeedback((current) => {
+              if (current && current.rootId === rootID) {
+                return current.unsupported ? current : { ...current, unsupported: true };
+              }
+              return { rootId: rootID, message: "", error: false, unsupported: true };
+            });
+          } else if (["failed", "busy", "conflict", "not_found"].includes(status)) {
+            reportError("session.native_title_sync_failed", t("session.nativeTitleSyncFailedForProject", {
+              project: rootID,
+              reason: typeof payload?.error === "string" && payload.error ? payload.error : status,
+            }), {
+              details: { root_id: rootID, session_key: payload?.session_key },
+            });
+          }
+          break;
+        }
         case "session.meta.updated":
           if (
             typeof payload?.root_id === "string" &&
@@ -14223,10 +14317,47 @@ export function App({ onGoHome }: AppProps) {
             <input
               type="checkbox"
               checked={externalFilterBound}
+              disabled={syncingSessionTitles}
               onChange={(e) => setExternalFilterBound(e.target.checked)}
             />
             <span>{t("externalImport.hideImported")}</span>
           </label>
+          {externalImportAgent === "omp" ? (
+            <>
+              <button
+                type="button"
+                disabled={!currentRootId || syncingSessionTitles}
+                title={t("externalImport.syncTitlesHelp")}
+                onClick={() => void handleSyncSessionTitles()}
+                style={{
+                  border: "1px solid var(--border-color)",
+                  borderRadius: "8px",
+                  background: "transparent",
+                  color: "var(--text-primary)",
+                  padding: "8px",
+                  fontSize: "12px",
+                  cursor: syncingSessionTitles ? "wait" : "pointer",
+                  opacity: syncingSessionTitles ? 0.65 : 1,
+                }}
+              >
+                {t(syncingSessionTitles ? "externalImport.syncingTitles" : "externalImport.syncTitles")}
+              </button>
+              {sessionTitleSyncFeedback?.rootId === currentRootId ? (
+                <div role="status" style={{
+                  fontSize: "12px",
+                  lineHeight: 1.5,
+                  color: sessionTitleSyncFeedback.error ? "var(--error-color, #dc2626)" : "var(--text-secondary)",
+                }}>
+                  {sessionTitleSyncFeedback.message}
+                  {sessionTitleSyncFeedback.unsupported ? (
+                    <div style={{ color: "var(--warning-color, #b45309)" }}>
+                      {t("externalImport.syncTitlesUnsupported")}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>

@@ -126,6 +126,12 @@ func (s *AppContext) GetSessionManager(rootID string) (*session.Manager, error) 
 		return rootCtx.Session, nil
 	}
 	mgr := session.NewManager(rootCtx.Root)
+	mgr.SetTitleSync(func(ctx context.Context, key, agentName string) {
+		if agentName != "omp" {
+			return
+		}
+		(&usecase.Service{Registry: s}).SyncSessionTitleAutomatic(ctx, rootID, key)
+	})
 	rootCtx.Session = mgr
 
 	return mgr, nil
@@ -766,6 +772,22 @@ func (s *AppContext) GetSessionStreamHub() *StreamHub {
 		s.streamHub = NewStreamHub(s.E2EE)
 	}
 	return s.streamHub
+}
+
+// BroadcastSessionTitleSync reports metadata side-effect outcomes separately
+// from chat streams, completion notifications, and task failure state.
+func (s *AppContext) BroadcastSessionTitleSync(rootID string, result usecase.TitleSyncResult) {
+	payload := map[string]any{
+		"root_id":          rootID,
+		"session_key":      result.SessionKey,
+		"agent":            "omp",
+		"agent_session_id": result.AgentSessionID,
+		"status":           result.Status,
+	}
+	if result.Error != "" {
+		payload["error"] = result.Error
+	}
+	s.GetSessionStreamHub().BroadcastAll(WSResponse{Type: "session.title_sync", Payload: payload})
 }
 
 func (s *AppContext) BroadcastSessionMetaUpdated(rootID string, sess *session.Session) {

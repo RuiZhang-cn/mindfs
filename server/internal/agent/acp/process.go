@@ -63,6 +63,7 @@ type CapabilitySnapshot struct {
 	PromptSupportsContext bool
 	SupportsSessionClose  bool
 	SupportsSessionResume bool
+	SupportsSessionTitle  bool
 }
 
 type stderrHintState struct {
@@ -82,6 +83,7 @@ var stderrMessagePattern = regexp.MustCompile(`"message"\s*:\s*"([^"]+)"`)
 
 type sessionState struct {
 	ID                     acp.SessionId
+	cwd                    string // Exact cwd sent to native session/new or session/resume.
 	models                 *acp.SessionModelState
 	modes                  *acp.SessionModeState
 	configOptions          []acp.SessionConfigOption
@@ -578,6 +580,7 @@ func (p *Process) Initialize(ctx context.Context) error {
 		PromptSupportsContext: resp.AgentCapabilities.PromptCapabilities.EmbeddedContext,
 		SupportsSessionClose:  resp.AgentCapabilities.SessionCapabilities.Close != nil,
 		SupportsSessionResume: resp.AgentCapabilities.LoadSession,
+		SupportsSessionTitle:  resp.AgentCapabilities.Meta["omp.sessionTitle"] == true,
 	}
 	return nil
 }
@@ -603,6 +606,7 @@ func (p *Process) NewSession(ctx context.Context, sessionKey, cwd string) error 
 	}
 	sess := &sessionState{
 		ID:            resp.SessionId,
+		cwd:           cwd,
 		models:        resp.Models,
 		modes:         resp.Modes,
 		configOptions: cloneConfigOptions(resp.ConfigOptions),
@@ -643,6 +647,7 @@ func (p *Process) ResumeSession(ctx context.Context, sessionKey, sessionID, cwd 
 	}
 	sess := &sessionState{
 		ID:            acp.SessionId(strings.TrimSpace(sessionID)),
+		cwd:           cwd,
 		models:        resp.Models,
 		configOptions: cloneConfigOptions(resp.ConfigOptions),
 	}

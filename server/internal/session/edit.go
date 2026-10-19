@@ -31,9 +31,17 @@ func (m *Manager) EditSnapshot(key string) (*Session, error) {
 // ReplaceHistoryBefore keeps the session identity while discarding the edited
 // message and its reply. Callers must exclude sends and external-history imports.
 // All old agent bindings are invalidated: another agent may also know the old text.
-func (m *Manager) ReplaceHistoryBefore(ctx context.Context, key string, target Exchange, binding *AgentBinding) (*Session, error) {
+func (m *Manager) ReplaceHistoryBefore(ctx context.Context, key string, target Exchange, binding *AgentBinding) (result *Session, retErr error) {
+	lock := m.titleLock(key)
+	lock.Lock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		lock.Unlock()
+		if retErr == nil && binding != nil {
+			m.notifyTitleSync(ctx, key, binding.Agent)
+		}
+	}()
 	s, err := m.getSessionUnsafe(key, 0)
 	if err != nil {
 		return nil, err
