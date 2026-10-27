@@ -6,6 +6,10 @@ import (
 )
 
 func (h *HTTPHandler) handleTokenStationUserInfo(w http.ResponseWriter, r *http.Request) {
+	if providerName := h.tokenStationProvider(); providerName != "" {
+		h.handleTokenStationProviderUserInfo(w, r, providerName)
+		return
+	}
 	manager := h.AppContext.GetRelayManager()
 	if manager == nil {
 		respondError(w, http.StatusServiceUnavailable, errServiceUnavailable("relay manager not configured"))
@@ -36,6 +40,17 @@ func (h *HTTPHandler) handleTokenStationUserInfo(w http.ResponseWriter, r *http.
 }
 
 func (h *HTTPHandler) handleTokenStationBindStart(w http.ResponseWriter, _ *http.Request) {
+	if providerName := h.tokenStationProvider(); providerName != "" {
+		topUpURL := ""
+		if provider, err := readOMPProvider(providerName); err == nil {
+			topUpURL = providerTopUpURL(provider.BaseURL)
+		}
+		respondJSON(w, http.StatusOK, map[string]any{
+			"bound":     true,
+			"topup_url": topUpURL,
+		})
+		return
+	}
 	manager := h.AppContext.GetRelayManager()
 	if manager == nil {
 		respondError(w, http.StatusServiceUnavailable, errServiceUnavailable("relay manager not configured"))

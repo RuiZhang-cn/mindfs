@@ -9,6 +9,7 @@ import {
   type TokenUsage,
 } from "../services/session";
 import { translateNow } from "../i18n";
+import { isPlaceholderAssistantText } from "../services/assistantText";
 
 type ExchangeLike = {
   seq?: number;
@@ -196,15 +197,21 @@ function buildAssistantTimeline(
   let segmentIndex = 0;
   for (const aux of normalizedAux) {
     if (aux.line > emittedLines) {
+      const segmentText = lines.slice(emittedLines, aux.line).join("\n");
       const segment = assistantSegmentItem(
         index,
         ex,
-        lines.slice(emittedLines, aux.line).join("\n"),
+        segmentText,
         segmentIndex,
         false,
       );
       if (segment) {
-        out.push(segment);
+        // Providers such as DeepSeek emit "." between a thinking block and a
+        // tool call. Keep it out of the history view unless it is the final
+        // assistant segment (a deliberately punctuation-only reply).
+        if (!isPlaceholderAssistantText(segmentText)) {
+          out.push(segment);
+        }
         segmentIndex += 1;
       }
       emittedLines = aux.line;

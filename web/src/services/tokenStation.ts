@@ -12,6 +12,12 @@ export type TokenStationInfo = {
     used_quota_text?: string;
     quota_display_text?: string;
     topup_url?: string;
+    provider_mode?: boolean;
+    provider_name?: string;
+    apply_supported?: boolean;
+    unit?: string;
+    plan_name?: string;
+    is_valid?: boolean;
     api_keys?: Array<{
       id?: number;
       name?: string;

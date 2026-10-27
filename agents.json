@@ -346,6 +346,12 @@
       "args": [
         "acp"
       ],
+      "mcpServers": [
+        { "name": "idea-mcp", "type": "sse", "url": "http://127.0.0.1:64342/sse" }
+      ],
+      "mcpConfigFiles": [
+        "~/.omp/agent/mcp.json"
+      ],
       "configBackup": {
         "fileSources": [
           "~/.omp/agent/.env",
@@ -482,5 +488,6 @@
     }
   ],
   "relayBaseURL": "https://relay.a9gent.com",
-  "tokenStationURL":"https://token.a9gent.com"
+  "tokenStationURL":"https://token.a9gent.com",
+  "tokenStationProvider":"hualong"
 }

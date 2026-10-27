@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 
+	types "mindfs/server/internal/agent/types"
 	configpkg "mindfs/server/internal/config"
 )
 
@@ -15,10 +16,11 @@ const configPathEnvKey = "MINDFS_AGENTS_CONFIG"
 
 // Config holds all agent configurations.
 type Config struct {
-	Agents          []Definition `json:"agents"`
-	Shells          []Shell      `json:"shells,omitempty"`
-	RelayBaseURL    string       `json:"relayBaseURL,omitempty"`
-	TokenStationURL string       `json:"tokenStationURL,omitempty"`
+	Agents               []Definition `json:"agents"`
+	Shells               []Shell      `json:"shells,omitempty"`
+	RelayBaseURL         string       `json:"relayBaseURL,omitempty"`
+	TokenStationURL      string       `json:"tokenStationURL,omitempty"`
+	TokenStationProvider string       `json:"tokenStationProvider,omitempty"`
 }
 
 type Shell struct {
@@ -78,6 +80,14 @@ type Definition struct {
 
 	// Env are additional environment variables.
 	Env map[string]string `json:"env,omitempty"`
+
+	// MCPServers are declared to the agent when it creates or resumes a session.
+	// Only ACP agents consume this field.
+	MCPServers []types.MCPServer `json:"mcpServers,omitempty"`
+
+	// MCPConfigFiles point at MCP config files (e.g. ~/.omp/agent/mcp.json).
+	// Their servers are declared to ACP agents in addition to MCPServers.
+	MCPConfigFiles []string `json:"mcpConfigFiles,omitempty"`
 
 	// ConfigBackup stores default inputs for config backup flows.
 	ConfigBackup ConfigBackupDefaults `json:"configBackup,omitempty"`
@@ -212,6 +222,7 @@ func loadInstalledDefaultConfig() (Config, string, error) {
 func normalizeConfig(cfg Config) (Config, error) {
 	cfg.RelayBaseURL = strings.TrimSpace(cfg.RelayBaseURL)
 	cfg.TokenStationURL = strings.TrimSpace(cfg.TokenStationURL)
+	cfg.TokenStationProvider = strings.TrimSpace(cfg.TokenStationProvider)
 	shells := make([]Shell, 0, len(cfg.Shells))
 	for _, shell := range cfg.Shells {
 		if trimmed := strings.TrimSpace(shell.Command); trimmed != "" {
@@ -257,10 +268,11 @@ func normalizeCommandList(commands LifecycleCommands) LifecycleCommands {
 
 func mergeConfigs(base Config, override Config) Config {
 	merged := Config{
-		Agents:          append([]Definition(nil), base.Agents...),
-		Shells:          append([]Shell(nil), base.Shells...),
-		RelayBaseURL:    base.RelayBaseURL,
-		TokenStationURL: base.TokenStationURL,
+		Agents:               append([]Definition(nil), base.Agents...),
+		Shells:               append([]Shell(nil), base.Shells...),
+		RelayBaseURL:         base.RelayBaseURL,
+		TokenStationURL:      base.TokenStationURL,
+		TokenStationProvider: base.TokenStationProvider,
 	}
 	if len(override.Shells) > 0 {
 		merged.Shells = mergeShells(base.Shells, override.Shells)
@@ -270,6 +282,9 @@ func mergeConfigs(base Config, override Config) Config {
 	}
 	if override.TokenStationURL != "" {
 		merged.TokenStationURL = override.TokenStationURL
+	}
+	if override.TokenStationProvider != "" {
+		merged.TokenStationProvider = override.TokenStationProvider
 	}
 
 	agentIndexes := make(map[string]int, len(merged.Agents))
@@ -309,6 +324,12 @@ func mergeAgentDefinition(base Definition, override Definition) Definition {
 	}
 	if len(merged.ProbeArgs) == 0 {
 		merged.ProbeArgs = append([]string(nil), base.ProbeArgs...)
+	}
+	if len(merged.MCPServers) == 0 {
+		merged.MCPServers = append([]types.MCPServer(nil), base.MCPServers...)
+	}
+	if len(merged.MCPConfigFiles) == 0 {
+		merged.MCPConfigFiles = append([]string(nil), base.MCPConfigFiles...)
 	}
 	return merged
 }

@@ -67,6 +67,7 @@ import {
   type BlueRingGestureConfig,
 } from "./services/quickSwitch";
 import { recordRecentDir } from "./services/recentDirs";
+import { mergeAssistantChunk } from "./services/assistantText";
 import {
   loadFontSizePreferences,
   persistFontSizePreferences,
@@ -1395,9 +1396,16 @@ function parseFirstNumber(text: string): number | null {
 function tokenStationWalletURL(baseURL: string): string {
   const fallback = "http://localhost:3000";
   const trimmed = String(baseURL || "").trim().replace(/\/+$/, "");
-  const target = `${trimmed || fallback}/wallet`;
+  if (!trimmed) {
+    return `${fallback}/wallet`;
+  }
   try {
-    return new URL(target).toString();
+    const url = new URL(trimmed);
+    if (url.pathname && url.pathname !== "/") {
+      return url.toString();
+    }
+    url.pathname = "/wallet";
+    return url.toString();
   } catch {
     return `${fallback}/wallet`;
   }
@@ -1563,6 +1571,7 @@ export function App({ onGoHome }: AppProps) {
   const queueFrozenBySessionRef = useRef<Record<string, boolean>>({});
   const optimisticDequeuedIdsRef = useRef<Record<string, Set<string>>>({});
   const cancelRequestedBySessionRef = useRef<Record<string, boolean>>({});
+  const pendingAssistantTextRef = useRef<Record<string, string>>({});
   const sessionCacheRef = useRef<Record<string, Session>>({});
   const loadedSessionRef = useRef<Record<string, boolean>>({});
   const loadingSessionRef = useRef<Partial<Record<string, Promise<SyncSessionResult>>>>({});
@@ -4197,6 +4206,13 @@ export function App({ onGoHome }: AppProps) {
     [rootSessionKey],
   );
 
+  const discardPendingAssistantText = useCallback(
+    (rootID: string, sessionKey: string) => {
+      delete pendingAssistantTextRef.current[rootSessionKey(rootID, sessionKey)];
+    },
+    [rootSessionKey],
+  );
+
   const appendAgentChunkForSession = useCallback(
     (
       rootID: string,
@@ -4211,8 +4227,22 @@ export function App({ onGoHome }: AppProps) {
 	      },
     ) => {
       if (!content) return;
-      const now = new Date().toISOString();
       const cacheKey = rootSessionKey(rootID, sessionKey);
+      // A punctuation-only delta is either the provider's "." placeholder
+      // between reasoning and a tool call, or a real dot inside streamed text
+      // such as an IP address. Hold it until the next delta decides; thought
+      // and tool events discard the buffer, a following text delta keeps it.
+      const merged = mergeAssistantChunk(
+        pendingAssistantTextRef.current[cacheKey] || "",
+        content,
+      );
+      if (!merged.text) {
+        pendingAssistantTextRef.current[cacheKey] = merged.pending;
+        return;
+      }
+      delete pendingAssistantTextRef.current[cacheKey];
+      content = merged.text;
+      const now = new Date().toISOString();
       const runtimeMeta = resolveRuntimeMetaForSession(
         rootID,
         sessionKey,
@@ -9519,6 +9549,9 @@ export function App({ onGoHome }: AppProps) {
         }
       };
       markStreamPending();
+      if (event.type !== "message_chunk") {
+        discardPendingAssistantText(activeRoot, streamKey);
+      }
       switch (event.type) {
         case "message_chunk":
           appendAgentChunkForSession(
@@ -10236,6 +10269,7 @@ export function App({ onGoHome }: AppProps) {
                 currentRootIdRef.current ||
                 "";
           if (rootID && sessionKey) {
+            discardPendingAssistantText(rootID, sessionKey);
             if (payload?.replay !== true) {
               playCompletionSound();
             }
@@ -10746,6 +10780,7 @@ export function App({ onGoHome }: AppProps) {
     appendTodoUpdateForSession,
     appendPlanUpdateForSession,
     appendCompactNoticeForSession,
+    discardPendingAssistantText,
     clearSessionStale,
     markSessionPending,
     markSessionStale,
@@ -14125,8 +14160,16 @@ export function App({ onGoHome }: AppProps) {
 
   const handleTokenStationAction = useCallback(async () => {
     setTokenStationErrorOpen(false);
-    const topupURL = String(tokenStationInfo?.data?.topup_url || "http://localhost:3000");
+    const providerMode = tokenStationInfo?.data?.provider_mode === true;
+    const rawTopupURL = String(tokenStationInfo?.data?.topup_url || "").trim();
+    const topupURL = rawTopupURL || "http://localhost:3000";
     const walletURL = tokenStationWalletURL(topupURL);
+    if (providerMode || tokenStationInfo?.success === true) {
+      if (!providerMode || rawTopupURL) {
+        window.open(walletURL, "_blank", "noopener,noreferrer");
+      }
+      return;
+    }
     if (relayStatus?.relay_bound || relayStatus?.token_station_bound) {
       window.open(walletURL, "_blank", "noopener,noreferrer");
       return;
@@ -14136,7 +14179,10 @@ export function App({ onGoHome }: AppProps) {
     try {
       const status = await startTokenStationBinding();
       if (status.bound) {
-        window.open(tokenStationWalletURL(String(status.topup_url || topupURL)), "_blank", "noopener,noreferrer");
+        const boundTopUpURL = String(status.topup_url || "").trim();
+        if (boundTopUpURL) {
+          window.open(tokenStationWalletURL(boundTopUpURL), "_blank", "noopener,noreferrer");
+        }
         pendingPopup?.close();
         return;
       }
@@ -14533,7 +14579,10 @@ export function App({ onGoHome }: AppProps) {
     ? t("tokenStation.reading")
     : formatTokenStationBalance(tokenStationInfo);
   const canApplyTokenStationConfig =
-    tokenStationInfo?.success === true && parseTokenStationBalance(tokenStationInfo) > 0;
+    tokenStationInfo?.success === true &&
+    tokenStationInfo?.data?.provider_mode !== true &&
+    tokenStationInfo?.data?.apply_supported !== false &&
+    parseTokenStationBalance(tokenStationInfo) > 0;
   const tokenStationCard = (
       <section
         aria-label={t("tokenStation.title")}
@@ -14608,7 +14657,9 @@ export function App({ onGoHome }: AppProps) {
           <span
             title={
               tokenStationInfo?.success
-                ? tokenStationBalanceText
+                ? [tokenStationInfo?.data?.provider_name, tokenStationBalanceText]
+                    .filter(Boolean)
+                    .join(" · ")
                 : tokenStationInfo?.message || t("tokenStation.unbound")
             }
             style={{

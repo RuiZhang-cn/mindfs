@@ -25,6 +25,8 @@ type OpenOptions struct {
 	Command         string
 	Args            []string
 	Env             map[string]string
+	MCPServers      []types.MCPServer
+	MCPConfigFiles  []string
 	Cwd             string
 	ResumeSessionID string
 }
@@ -281,6 +283,7 @@ func (r *Runtime) getOrCreateProcess(opts OpenOptions) (*Process, error) {
 	if err != nil {
 		return nil, err
 	}
+	proc.SetMCPServers(opts.MCPServers, opts.MCPConfigFiles)
 
 	if err := proc.Initialize(r.processCtx); err != nil {
 		proc.Close()

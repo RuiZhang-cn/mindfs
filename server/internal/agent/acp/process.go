@@ -46,6 +46,7 @@ type Process struct {
 	modes         *acp.SessionModeState
 	configOptions []acp.SessionConfigOption
 	commands      []acp.AvailableCommand
+	mcpServers    []acp.McpServer
 	stderrHint    stderrHintState
 	activePrompt  activePromptState
 }
@@ -585,6 +586,20 @@ func (p *Process) Initialize(ctx context.Context) error {
 	return nil
 }
 
+// SetMCPServers declares the MCP servers this agent exposes for new or resumed
+// sessions. configFiles are read at call time so changes to the agent's own MCP
+// config (e.g. ~/.omp/agent/mcp.json) are picked up on the next start.
+func (p *Process) SetMCPServers(defs []types.MCPServer, configFiles []string) {
+	p.mcpServers = toACPMcpServers(resolveMCPServers(defs, configFiles))
+}
+
+func (p *Process) sessionMCPServers() []acp.McpServer {
+	if len(p.mcpServers) == 0 {
+		return []acp.McpServer{}
+	}
+	return p.mcpServers
+}
+
 // NewSession creates a new ACP session for the given MindFS session key.
 func (p *Process) NewSession(ctx context.Context, sessionKey, cwd string) error {
 	p.mu.Lock()
@@ -594,10 +609,20 @@ func (p *Process) NewSession(ctx context.Context, sessionKey, cwd string) error 
 	}
 	p.mu.Unlock()
 
+	mcpServers := p.sessionMCPServers()
 	resp, err := p.conn.NewSession(ctx, acp.NewSessionRequest{
 		Cwd:        cwd,
-		McpServers: []acp.McpServer{},
+		McpServers: mcpServers,
 	})
+	if err != nil && len(mcpServers) > 0 {
+		// A broken MCP server must not make the whole agent unusable: fall back
+		// to a session without MCP declarations and keep the failure in the log.
+		log.Printf("[agent/acp] new_session.mcp_retry agent=%s session_key=%s err=%v", p.agentLabel(), sessionKey, err)
+		resp, err = p.conn.NewSession(ctx, acp.NewSessionRequest{
+			Cwd:        cwd,
+			McpServers: []acp.McpServer{},
+		})
+	}
 	if err != nil {
 		return err
 	}
@@ -637,11 +662,20 @@ func (p *Process) ResumeSession(ctx context.Context, sessionKey, sessionID, cwd 
 	}
 	p.mu.Unlock()
 
+	mcpServers := p.sessionMCPServers()
 	resp, err := p.conn.ResumeSession(ctx, acp.ResumeSessionRequest{
 		Cwd:        cwd,
-		McpServers: []acp.McpServer{},
+		McpServers: mcpServers,
 		SessionId:  acp.SessionId(strings.TrimSpace(sessionID)),
 	})
+	if err != nil && len(mcpServers) > 0 {
+		log.Printf("[agent/acp] resume_session.mcp_retry agent=%s session_key=%s err=%v", p.agentLabel(), sessionKey, err)
+		resp, err = p.conn.ResumeSession(ctx, acp.ResumeSessionRequest{
+			Cwd:        cwd,
+			McpServers: []acp.McpServer{},
+			SessionId:  acp.SessionId(strings.TrimSpace(sessionID)),
+		})
+	}
 	if err != nil {
 		return err
 	}
