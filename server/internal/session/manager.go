@@ -970,6 +970,49 @@ func (m *Manager) Rename(ctx context.Context, key, name string) (*Session, error
 	return m.renameTitle(ctx, key, name, nil)
 }
 
+// DetachChildren promotes direct children to top-level sessions. Descendants
+// retain their existing hierarchy and fork source metadata remains available.
+func (m *Manager) DetachChildren(ctx context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	db, err := m.ensureSessionMetaDBUnsafe()
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `UPDATE sessions SET parent_session_key = '', parent_tool_call_id = '' WHERE parent_session_key = ?`, strings.TrimSpace(key))
+	if err == nil {
+		for _, cached := range m.sessions {
+			if cached.ParentSessionKey == strings.TrimSpace(key) {
+				cached.ParentSessionKey = ""
+				cached.ParentToolCallID = ""
+			}
+		}
+	}
+	return err
+}
+
+// Detach promotes a session without changing its history or descendants.
+func (m *Manager) Detach(_ context.Context, key string) (*Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, err := m.getSessionUnsafe(key, 0)
+	if err != nil {
+		return nil, err
+	}
+	if current.ParentSessionKey == "" && current.ParentToolCallID == "" {
+		return current, nil
+	}
+	next := *current
+	next.ParentSessionKey = ""
+	next.ParentToolCallID = ""
+	next.UpdatedAt = m.now().UTC()
+	if err := m.upsertSessionMetaUnsafe(&next); err != nil {
+		return nil, err
+	}
+	*current = next
+	return current, nil
+}
+
 func (m *Manager) SetPinned(_ context.Context, key string, pinned bool) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

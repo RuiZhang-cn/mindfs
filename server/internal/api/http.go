@@ -57,7 +57,8 @@ type protectedResponseWriter struct {
 }
 
 const (
-	maxUploadRequestBytes = 64 << 20
+	maxJSONRequestBytes   = 64 << 20
+	uploadMemoryBytes     = 8 << 20
 	maxUploadFileCount    = 20
 	sessionListPageSize   = 50
 	multiRootSessionLimit = 6
@@ -188,7 +189,7 @@ func (h *HTTPHandler) protectedEndpoint(next http.HandlerFunc) http.HandlerFunc 
 		}
 		if r.Body != nil && r.ContentLength != 0 && r.Method != http.MethodGet && r.Method != http.MethodHead {
 			var envelope e2ee.CipherEnvelope
-			if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&envelope); err != nil {
+			if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONRequestBytes)).Decode(&envelope); err != nil {
 				respondError(w, http.StatusBadRequest, errInvalidRequest("invalid protected payload"))
 				return
 			}
@@ -336,6 +337,8 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Delete("/api/prompts", h.protectedEndpoint(h.handlePromptDelete))
 	r.Get("/api/sessions", h.protectedEndpoint(h.handleSessions))
 	r.Get("/api/preferences/session-naming", h.protectedEndpoint(h.handleSessionNamingPreferenceGet))
+	r.Post("/api/config/export", h.protectedEndpoint(h.handleConfigExport))
+	r.Post("/api/config/import", h.protectedEndpoint(h.handleConfigImport))
 	r.Put("/api/preferences/model-pins", h.protectedEndpoint(h.handleModelPinsPut))
 	r.Get("/api/nodes", h.protectedEndpoint(h.handleLauncherNodes))
 	r.Put("/api/nodes", h.protectedEndpoint(h.handleLauncherNodes))
@@ -363,6 +366,7 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Post("/api/sessions/{key}/pin", h.protectedEndpoint(h.handleSessionPin))
 	r.Post("/api/sessions/{key}/rename", h.protectedEndpoint(h.handleSessionRename))
 	r.Post("/api/sessions/titles/sync", h.protectedEndpoint(h.handleSessionTitlesSync))
+	r.Post("/api/sessions/{key}/detach", h.protectedEndpoint(h.handleSessionDetach))
 	r.Delete("/api/sessions/{key}/related-files", h.protectedEndpoint(h.handleSessionRelatedFilesDelete))
 	r.Delete("/api/sessions/{key}", h.protectedEndpoint(h.handleSessionDelete))
 	r.Get("/api/scheduled-agent-tasks", h.protectedEndpoint(h.handleScheduledAgentTasksList))
@@ -1034,9 +1038,10 @@ func (h *HTTPHandler) handleSessionRelatedFilesDelete(w http.ResponseWriter, r *
 
 func (h *HTTPHandler) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RootID     string `json:"root_id"`
-		SessionKey string `json:"session_key"`
-		Seq        int    `json:"seq"`
+		RootID      string `json:"root_id"`
+		SessionKey  string `json:"session_key"`
+		Seq         int    `json:"seq"`
+		Independent bool   `json:"independent"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid json body"))
@@ -1047,9 +1052,10 @@ func (h *HTTPHandler) handleSessionFork(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	out, err := h.service().ForkSession(r.Context(), usecase.ForkSessionInput{
-		RootID: req.RootID,
-		Key:    req.SessionKey,
-		Seq:    req.Seq,
+		RootID:      req.RootID,
+		Key:         req.SessionKey,
+		Seq:         req.Seq,
+		Independent: req.Independent,
 	})
 	if err != nil {
 		log.Printf("[session/fork] failed root=%s parent=%s seq=%d err=%v", req.RootID, req.SessionKey, req.Seq, err)
@@ -1122,6 +1128,27 @@ func (h *HTTPHandler) handleSessionRename(w http.ResponseWriter, r *http.Request
 	respondJSON(w, http.StatusOK, payload)
 }
 
+func (h *HTTPHandler) handleSessionDetach(w http.ResponseWriter, r *http.Request) {
+	rootID := r.URL.Query().Get("root")
+	key := chi.URLParam(r, "key")
+	if strings.TrimSpace(key) == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("session key required"))
+		return
+	}
+	updated, err := h.service().DetachSession(r.Context(), usecase.DetachSessionInput{RootID: rootID, Key: key})
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	if h.AppContext != nil {
+		h.AppContext.GetSessionStreamHub().BroadcastAll(WSResponse{
+			Type:    "session.meta.updated",
+			Payload: map[string]any{"root_id": rootID, "session": h.sessionListResponse(updated)},
+		})
+	}
+	respondJSON(w, http.StatusOK, h.sessionListResponse(updated))
+}
+
 func (h *HTTPHandler) handleSessionPin(w http.ResponseWriter, r *http.Request) {
 	rootID := r.URL.Query().Get("root")
 	key := chi.URLParam(r, "key")
@@ -1166,8 +1193,9 @@ func (h *HTTPHandler) handleSessionDelete(w http.ResponseWriter, r *http.Request
 	}
 	uc := h.service()
 	if err := uc.DeleteSession(r.Context(), usecase.DeleteSessionInput{
-		RootID: rootID,
-		Key:    key,
+		RootID:       rootID,
+		Key:          key,
+		KeepChildren: r.URL.Query().Get("keep_children") == "1",
 	}); err != nil {
 		respondError(w, http.StatusNotFound, err)
 		return
@@ -2311,8 +2339,8 @@ func (h *HTTPHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusUnauthorized, err)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadRequestBytes)
-	if err := r.ParseMultipartForm(maxUploadRequestBytes); err != nil {
+	// Bound memory use, not file size: larger files spill to temporary disk storage.
+	if err := r.ParseMultipartForm(uploadMemoryBytes); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid multipart form"))
 		return
 	}
@@ -2320,6 +2348,7 @@ func (h *HTTPHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("files required"))
 		return
 	}
+	defer r.MultipartForm.RemoveAll()
 	fileHeaders := r.MultipartForm.File["files"]
 	if len(fileHeaders) == 0 {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("files required"))
