@@ -23,6 +23,8 @@ import { NoWorktreeIcon } from "./NoWorktreeIcon";
 import { CodexRateLimitIndicator } from "./CodexRateLimitIndicator";
 import { AgentMemoryIndicator } from "./AgentMemoryIndicator";
 import { deletePrompt, savePrompt } from "../services/prompts";
+import { collectPastedFiles, normalizePastedFiles } from "../services/pasteFiles";
+import { useFileDrop } from "../hooks/useFileDrop";
 import { matchesSendShortcut, type SendShortcut } from "../services/sendShortcut";
 import type { BlueRingGestureConfig } from "../services/quickSwitch";
 import { SessionQuickActions, type SessionQuickActionsProps } from "./SessionQuickActions";
@@ -899,6 +901,11 @@ export function ActionBar({
     setPendingAttachments((prev) => [...prev, ...files.map(buildPendingAttachment)]);
   }, []);
 
+  const { isDragging: isDraggingFiles, dropHandlers: fileDropHandlers } = useFileDrop({
+    disabled: sending || !currentRootId,
+    onFiles: appendPendingAttachments,
+  });
+
   const handleEditorChange = useCallback((payload: {
     serializedText: string;
     displayText: string;
@@ -1278,16 +1285,14 @@ export function ActionBar({
     if (sending || !currentRootId) {
       return;
     }
-    const clipboardItems = Array.from(event.clipboardData?.items || []);
-    const imageFiles = clipboardItems
-      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => !!file);
-    if (imageFiles.length === 0) {
+    const pastedFiles = collectPastedFiles(event.clipboardData);
+    if (pastedFiles.length === 0) {
       return;
     }
+    // 微信“复制图片”和资源管理器给出的是文件列表（CF_HDROP），MIME 可能为空。
     event.preventDefault();
-    appendPendingAttachments(imageFiles);
+    event.stopPropagation();
+    void normalizePastedFiles(pastedFiles).then(appendPendingAttachments);
   }, [appendPendingAttachments, currentRootId, sending]);
 
   const isSelectedAgentUnavailable = agents.length > 0 ? agents.find((a) => a.name === agent)?.available === false : false;
@@ -1349,7 +1354,14 @@ export function ActionBar({
   ) : null;
 
   return (
-    <div data-onboarding="action-bar" style={{ width: "100%", minWidth: 0, padding: isMobile ? "0 0 var(--mindfs-actionbar-bottom-padding, calc(env(safe-area-inset-bottom, 0px) + 2px))" : "0 16px 12px", display: "flex", justifyContent: "center", boxSizing: "border-box", background: "var(--content-bg)" }}>
+    <div
+      data-onboarding="action-bar"
+      className="mindfs-file-drop-zone"
+      data-file-drop-active={isDraggingFiles || undefined}
+      data-file-drop-label={t("action.dropFiles")}
+      {...fileDropHandlers}
+      style={{ position: "relative", width: "100%", minWidth: 0, padding: isMobile ? "0 0 var(--mindfs-actionbar-bottom-padding, calc(env(safe-area-inset-bottom, 0px) + 2px))" : "0 16px 12px", display: "flex", justifyContent: "center", boxSizing: "border-box", background: "var(--content-bg)" }}
+    >
       <div style={{ position: "relative", width: "100%", minWidth: 0, display: "flex", flexDirection: "column", gap: 0 }}>
         <div
             style={{

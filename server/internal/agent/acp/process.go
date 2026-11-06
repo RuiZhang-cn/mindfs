@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"regexp"
@@ -92,8 +93,13 @@ type sessionState struct {
 	contextWindow          types.ContextWindow
 	contextUsageUpdateSeen bool
 	lastUsage              cumulativeTokenUsage
-	onUpdate               func(SessionUpdate)
-	mu                     sync.RWMutex
+	lastCost               cumulativeCost
+	// costBaselineOnly swallows the first cumulative cost snapshot of a resumed
+	// session: it covers history, not the turn that reported it.
+	costBaselineOnly bool
+	turnExtras       turnUsageExtras
+	onUpdate         func(SessionUpdate)
+	mu               sync.RWMutex
 }
 
 type cumulativeTokenUsage struct {
@@ -101,6 +107,24 @@ type cumulativeTokenUsage struct {
 	outputTokens     int
 	cacheReadTokens  int
 	cacheWriteTokens int
+	totalTokens      int
+}
+
+// cumulativeCost is the agent-reported session spend. ACP usage updates carry
+// a cumulative amount, so each turn's spend is the delta between snapshots.
+type cumulativeCost struct {
+	amount   float64
+	currency string
+	seen     bool
+}
+
+// turnUsageExtras accumulates per-turn billing telemetry until the prompt
+// returns and it is attached to the turn's TokenUsage.
+type turnUsageExtras struct {
+	requests   int
+	durationMs int64
+	cost       float64
+	currency   string
 }
 
 type qwenSlashCommandNotification struct {
@@ -214,6 +238,7 @@ func (s *sessionState) tokenUsageForPrompt(agentName string, usage *acp.Usage) *
 	current := cumulativeTokenUsage{
 		inputTokens:  max(0, usage.InputTokens),
 		outputTokens: max(0, usage.OutputTokens),
+		totalTokens:  max(0, usage.TotalTokens),
 	}
 	if usage.CachedReadTokens != nil {
 		current.cacheReadTokens = max(0, *usage.CachedReadTokens)
@@ -234,20 +259,31 @@ func (s *sessionState) tokenUsageForPrompt(agentName string, usage *acp.Usage) *
 
 	inputTokens := cumulativeCounterDelta(current.inputTokens, previous.inputTokens)
 	outputTokens := cumulativeCounterDelta(current.outputTokens, previous.outputTokens)
+	totalTokens := cumulativeCounterDelta(current.totalTokens, previous.totalTokens)
 	result := &types.TokenUsage{
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 	}
+	cacheReadTokens := 0
 	if usage.CachedReadTokens != nil {
-		value := cumulativeCounterDelta(current.cacheReadTokens, previous.cacheReadTokens)
-		result.CacheReadTokens = &value
-		result.InputTokens = max(result.InputTokens, value)
+		cacheReadTokens = cumulativeCounterDelta(current.cacheReadTokens, previous.cacheReadTokens)
+		result.CacheReadTokens = &cacheReadTokens
 	}
+	cacheWriteTokens := 0
 	if usage.CachedWriteTokens != nil {
-		value := cumulativeCounterDelta(current.cacheWriteTokens, previous.cacheWriteTokens)
-		result.CacheWriteTokens = &value
-		result.InputTokens = max(result.InputTokens, value)
+		cacheWriteTokens = cumulativeCounterDelta(current.cacheWriteTokens, previous.cacheWriteTokens)
+		result.CacheWriteTokens = &cacheWriteTokens
 	}
+	// ACP spec leaves it open whether inputTokens already includes cached
+	// tokens. The reported total disambiguates: when it covers the sum of
+	// fresh input, cache read, cache write, and output, inputTokens is
+	// exclusive and the logical input is that sum. Otherwise cached counters
+	// are a subset of inputTokens, so the input count stands as reported.
+	logicalInput := max(inputTokens, cacheReadTokens, cacheWriteTokens)
+	if withCache := inputTokens + cacheReadTokens + cacheWriteTokens; totalTokens >= withCache+outputTokens {
+		logicalInput = withCache
+	}
+	result.InputTokens = logicalInput
 	if result.InputTokens == 0 && result.OutputTokens == 0 && result.CacheReadTokens == nil && result.CacheWriteTokens == nil {
 		return nil
 	}
@@ -259,6 +295,138 @@ func cumulativeCounterDelta(current, previous int) int {
 		return current
 	}
 	return current - previous
+}
+
+// acpTurnUsageMeta is the optional per-turn telemetry OMP attaches to
+// usage_update `_meta["omp.turnUsage"]`. Values are deltas for the prompt turn
+// that just finished.
+type acpTurnUsageMeta struct {
+	Requests int `json:"requests"`
+	// DurationMs is fractional: OMP reports measured model time, not an
+	// integer millisecond counter. Declaring it int64 rejects the whole
+	// payload, silently dropping requests and cost too.
+	DurationMs float64 `json:"durationMs"`
+	Cost       float64 `json:"cost"`
+	Currency   string  `json:"currency"`
+}
+
+func turnUsageFromMeta(meta map[string]any) (acpTurnUsageMeta, bool) {
+	raw, ok := meta["omp.turnUsage"]
+	if !ok {
+		return acpTurnUsageMeta{}, false
+	}
+	// Round-trip through JSON so any decoder-specific numeric type is normalized.
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return acpTurnUsageMeta{}, false
+	}
+	var parsed acpTurnUsageMeta
+	if err := json.Unmarshal(encoded, &parsed); err != nil {
+		return acpTurnUsageMeta{}, false
+	}
+	return parsed, true
+}
+
+func normalizeCostCurrency(currency string) string {
+	return strings.ToUpper(strings.TrimSpace(currency))
+}
+
+func (s *sessionState) resetTurnExtras() {
+	s.mu.Lock()
+	s.turnExtras = turnUsageExtras{}
+	s.mu.Unlock()
+}
+
+func (s *sessionState) takeTurnExtras() turnUsageExtras {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	extras := s.turnExtras
+	s.turnExtras = turnUsageExtras{}
+	return extras
+}
+
+// attachTurnExtras folds the turn's billing telemetry into its token usage.
+// Backends that report only tokens keep the usage unchanged.
+func attachTurnExtras(usage *types.TokenUsage, extras turnUsageExtras) *types.TokenUsage {
+	if extras.requests <= 0 && extras.durationMs <= 0 && extras.cost <= 0 {
+		return usage
+	}
+	if usage == nil {
+		usage = &types.TokenUsage{}
+	}
+	if extras.requests > 0 {
+		usage.Requests = extras.requests
+	}
+	if extras.durationMs > 0 {
+		durationMs := extras.durationMs
+		usage.DurationMs = &durationMs
+	}
+	if extras.cost > 0 {
+		cost := extras.cost
+		usage.CostAmount = &cost
+		usage.CostCurrency = extras.currency
+	}
+	return usage
+}
+
+// observeUsageCost keeps the cumulative cost baseline current and, unless the
+// agent reported an exact turn cost through `_meta`, attributes the snapshot
+// delta to the current turn.
+func (s *sessionState) observeUsageCost(cost *acp.Cost, attribute bool) {
+	if cost == nil {
+		return
+	}
+	currency := normalizeCostCurrency(cost.Currency)
+	amount := max(0, cost.Amount)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delta := amount
+	if s.lastCost.seen && s.lastCost.currency == currency {
+		delta = amount - s.lastCost.amount
+		if delta < 0 {
+			delta = amount // agent reset its counter
+		}
+	}
+	s.lastCost = cumulativeCost{amount: amount, currency: currency, seen: true}
+	if !attribute || s.costBaselineOnly {
+		s.costBaselineOnly = false
+		return
+	}
+	if delta > 0 {
+		s.addTurnCostLocked(delta, currency)
+	}
+}
+
+func (s *sessionState) addTurnUsageMeta(meta acpTurnUsageMeta) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if meta.Requests > 0 {
+		s.turnExtras.requests += meta.Requests
+	}
+	if meta.DurationMs > 0 {
+		s.turnExtras.durationMs += int64(math.Round(meta.DurationMs))
+	}
+	if meta.Cost > 0 {
+		s.addTurnCostLocked(meta.Cost, normalizeCostCurrency(meta.Currency))
+	}
+}
+
+// addTurnCostLocked sums same-currency spend only; mixing currencies would
+// produce a meaningless total, so the first currency of a turn wins.
+func (s *sessionState) addTurnCostLocked(amount float64, currency string) {
+	if amount <= 0 {
+		return
+	}
+	if currency == "" {
+		currency = "USD"
+	}
+	if s.turnExtras.currency == "" {
+		s.turnExtras.currency = currency
+	}
+	if s.turnExtras.currency != currency {
+		return
+	}
+	s.turnExtras.cost += amount
 }
 
 // SessionUpdate is the internal session update type.
@@ -335,11 +503,15 @@ func (c *mindfsClient) SessionUpdate(ctx context.Context, params acp.SessionNoti
 		c.proc.configOptions = cloneConfigOptions(params.Update.ConfigOptionUpdate.ConfigOptions)
 		c.proc.mu.Unlock()
 	}
-	if params.Update.UsageUpdate != nil {
-		session.setUsageUpdate(
-			params.Update.UsageUpdate.Used,
-			params.Update.UsageUpdate.Size,
-		)
+	if usageUpdate := params.Update.UsageUpdate; usageUpdate != nil {
+		session.setUsageUpdate(usageUpdate.Used, usageUpdate.Size)
+		// `omp.turnUsage` carries exact per-turn telemetry; its cost already
+		// accounts for history, so the cumulative snapshot is not re-delted.
+		meta, hasTurnMeta := turnUsageFromMeta(usageUpdate.Meta)
+		session.observeUsageCost(usageUpdate.Cost, !hasTurnMeta)
+		if hasTurnMeta {
+			session.addTurnUsageMeta(meta)
+		}
 	}
 
 	if internalUpdate.Type != "" {
@@ -593,7 +765,10 @@ func (p *Process) SetMCPServers(defs []types.MCPServer, configFiles []string) {
 	p.mcpServers = toACPMcpServers(resolveMCPServers(defs, configFiles))
 }
 
-func (p *Process) sessionMCPServers() []acp.McpServer {
+func (p *Process) sessionMCPServers(disableMCP bool) []acp.McpServer {
+	if disableMCP {
+		return []acp.McpServer{}
+	}
 	if len(p.mcpServers) == 0 {
 		return []acp.McpServer{}
 	}
@@ -601,7 +776,7 @@ func (p *Process) sessionMCPServers() []acp.McpServer {
 }
 
 // NewSession creates a new ACP session for the given MindFS session key.
-func (p *Process) NewSession(ctx context.Context, sessionKey, cwd string) error {
+func (p *Process) NewSession(ctx context.Context, sessionKey, cwd string, disableMCP bool) error {
 	p.mu.Lock()
 	if _, ok := p.sessions[sessionKey]; ok {
 		p.mu.Unlock()
@@ -609,7 +784,7 @@ func (p *Process) NewSession(ctx context.Context, sessionKey, cwd string) error 
 	}
 	p.mu.Unlock()
 
-	mcpServers := p.sessionMCPServers()
+	mcpServers := p.sessionMCPServers(disableMCP)
 	resp, err := p.conn.NewSession(ctx, acp.NewSessionRequest{
 		Cwd:        cwd,
 		McpServers: mcpServers,
@@ -654,7 +829,7 @@ func (p *Process) NewSession(ctx context.Context, sessionKey, cwd string) error 
 	return nil
 }
 
-func (p *Process) ResumeSession(ctx context.Context, sessionKey, sessionID, cwd string) error {
+func (p *Process) ResumeSession(ctx context.Context, sessionKey, sessionID, cwd string, disableMCP bool) error {
 	p.mu.Lock()
 	if _, ok := p.sessions[sessionKey]; ok {
 		p.mu.Unlock()
@@ -662,7 +837,7 @@ func (p *Process) ResumeSession(ctx context.Context, sessionKey, sessionID, cwd 
 	}
 	p.mu.Unlock()
 
-	mcpServers := p.sessionMCPServers()
+	mcpServers := p.sessionMCPServers(disableMCP)
 	resp, err := p.conn.ResumeSession(ctx, acp.ResumeSessionRequest{
 		Cwd:        cwd,
 		McpServers: mcpServers,
@@ -680,10 +855,11 @@ func (p *Process) ResumeSession(ctx context.Context, sessionKey, sessionID, cwd 
 		return err
 	}
 	sess := &sessionState{
-		ID:            acp.SessionId(strings.TrimSpace(sessionID)),
-		cwd:           cwd,
-		models:        resp.Models,
-		configOptions: cloneConfigOptions(resp.ConfigOptions),
+		ID:               acp.SessionId(strings.TrimSpace(sessionID)),
+		cwd:              cwd,
+		models:           resp.Models,
+		configOptions:    cloneConfigOptions(resp.ConfigOptions),
+		costBaselineOnly: true,
 	}
 	if resp.Modes != nil {
 		sess.modes = resp.Modes
@@ -723,6 +899,9 @@ func (p *Process) SendMessage(ctx context.Context, sessionKey, content string) e
 		return nil
 	}
 	log.Printf("[agent/acp] send.begin agent=%s session_key=%s content=%q", p.agentLabel(), sessionKey, content)
+	// Drop anything a previous turn's late usage_update left behind; this turn
+	// only reports its own deltas.
+	sess.resetTurnExtras()
 
 	promptCtx, promptCancel := context.WithCancel(ctx)
 	promptID := time.Now().UnixNano()
@@ -753,6 +932,7 @@ func (p *Process) SendMessage(ctx context.Context, sessionKey, content string) e
 		}
 		tokenUsage = sess.tokenUsageForPrompt(p.agentName, resp.Usage)
 	}
+	tokenUsage = attachTurnExtras(tokenUsage, sess.takeTurnExtras())
 
 	// Signal completion
 	if onUpdate := sess.getOnUpdate(); onUpdate != nil {

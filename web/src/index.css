@@ -53,6 +53,25 @@
   --root-badge-text: #4f46e5;
 }
 
+.mindfs-file-drop-zone[data-file-drop-active="true"]::after {
+  content: attr(data-file-drop-label);
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  border: 2px dashed var(--accent-color);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-bg) 92%, transparent);
+  color: var(--accent-color);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: center;
+  pointer-events: none;
+}
+
 /* Region font preferences preserve the existing type hierarchy while scaling text only. */
 .mindfs-font-scale-region {
   font-size: calc(16px * var(--mindfs-font-scale, 1));

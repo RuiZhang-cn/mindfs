@@ -45,6 +45,44 @@ func TestClaudeTokenUsageIncludesCacheReadAndCreationInLogicalInput(t *testing.T
 	}
 }
 
+func TestClaudeTokenUsageIncludesBillingTelemetry(t *testing.T) {
+	got := claudeTokenUsage(claudeagent.ResultMessage{
+		Usage: &claudeagent.NonNullableUsage{
+			InputTokens:  50,
+			OutputTokens: 1_100,
+		},
+		NumTurns:      3,
+		TotalCostUSD:  0.0421,
+		DurationMs:    9_000,
+		DurationAPIMs: 4_500,
+	})
+	if got == nil {
+		t.Fatal("usage = nil")
+	}
+	if got.Requests != 3 {
+		t.Fatalf("requests = %d, want 3", got.Requests)
+	}
+	if got.DurationMs == nil || *got.DurationMs != 4_500 {
+		t.Fatalf("duration = %#v, want API duration 4500", got.DurationMs)
+	}
+	if got.CostAmount == nil || *got.CostAmount != 0.0421 || got.CostCurrency != "USD" {
+		t.Fatalf("cost = %#v %q, want 0.0421 USD", got.CostAmount, got.CostCurrency)
+	}
+}
+
+func TestClaudeTokenUsageKeepsBillingWithoutTokens(t *testing.T) {
+	got := claudeTokenUsage(claudeagent.ResultMessage{
+		NumTurns:     1,
+		TotalCostUSD: 0.01,
+	})
+	if got == nil {
+		t.Fatal("usage = nil, want cost-only usage")
+	}
+	if got.CostAmount == nil || *got.CostAmount != 0.01 {
+		t.Fatalf("cost = %#v, want 0.01", got.CostAmount)
+	}
+}
+
 func TestAppendClaudeDeveloperInstructionsUsesCLIAppendSystemPrompt(t *testing.T) {
 	options := claudeagent.DefaultOptions()
 	for _, apply := range appendClaudeDeveloperInstructions(nil, "render markdown") {

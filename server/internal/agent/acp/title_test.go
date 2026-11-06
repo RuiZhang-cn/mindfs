@@ -216,6 +216,44 @@ func TestSessionTitleReadAndCASWire(t *testing.T) {
 	assertTitleTranscript(t, path, "initialize", "_omp/session/title", "_omp/session/title", "_omp/session/title")
 }
 
+func TestNewSessionCanDisableConfiguredMCPServers(t *testing.T) {
+	server := types.MCPServer{Name: "idea-mcp", Type: "sse", URL: "http://127.0.0.1:64342/sse"}
+	for _, tc := range []struct {
+		name       string
+		disableMCP bool
+	}{
+		{name: "enabled", disableMCP: false},
+		{name: "disabled", disableMCP: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd := t.TempDir()
+			mcpServers := make([]map[string]any, 0, 1)
+			if !tc.disableMCP {
+				mcpServers = append(mcpServers, map[string]any{
+					"name":    server.Name,
+					"type":    server.Type,
+					"url":     server.URL,
+					"headers": []any{},
+				})
+			}
+			params, err := json.Marshal(map[string]any{"cwd": cwd, "mcpServers": mcpServers})
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts, path := titleFixtureOptions(t,
+				titleInitializeStep(true),
+				titleProtocolStep{Method: "session/new", Params: params, Result: json.RawMessage(`{"sessionId":"native"}`)},
+			)
+			p := startTitleFixture(t, opts)
+			p.SetMCPServers([]types.MCPServer{server}, nil)
+			if err := p.NewSession(context.Background(), "local", cwd, tc.disableMCP); err != nil {
+				t.Fatal(err)
+			}
+			assertTitleTranscript(t, path, "initialize", "session/new")
+		})
+	}
+}
+
 func TestImporterSessionTitleMetadataOnly(t *testing.T) {
 	in := types.SessionTitleRequest{SessionID: "native", Cwd: normalizeComparablePath(t.TempDir())}
 	opts, path := titleFixtureOptions(t, titleInitializeStep(true),
@@ -255,7 +293,7 @@ func TestSessionTitleTimeoutKeepsLiveProcess(t *testing.T) {
 		titleProtocolStep{Method: "session/new", Result: json.RawMessage(`{"sessionId":"native"}`)},
 		delayed, titleStep(in, `{"sessionId":"native","title":"Still alive","status":"unchanged"}`))
 	p := startTitleFixture(t, opts)
-	if err := p.NewSession(context.Background(), "local", in.Cwd); err != nil {
+	if err := p.NewSession(context.Background(), "local", in.Cwd, false); err != nil {
 		t.Fatal(err)
 	}
 	s := &session{proc: p, sessionKey: "local"}

@@ -1,6 +1,8 @@
 package acp
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -86,6 +88,36 @@ func TestACPTokenUsageConvertsCumulativeCountersToTurnDelta(t *testing.T) {
 				t.Fatalf("second cache write = %#v", second.CacheWriteTokens)
 			}
 		})
+	}
+}
+
+func TestACPTokenUsageSeparatesUncachedInputUsingReportedTotal(t *testing.T) {
+	// OMP reports inputTokens excluding cache, and totalTokens covering every
+	// token type; the logical input must therefore include cache read/write.
+	state := &sessionState{}
+	read, write := 200_000, 1_000
+	exclusive := state.tokenUsageForPrompt("omp", &acpsdk.Usage{
+		InputTokens:       900,
+		OutputTokens:      300,
+		TotalTokens:       900 + 300 + 200_000 + 1_000,
+		CachedReadTokens:  &read,
+		CachedWriteTokens: &write,
+	})
+	if exclusive == nil || exclusive.InputTokens != 201_900 || exclusive.OutputTokens != 300 {
+		t.Fatalf("exclusive usage = %#v", exclusive)
+	}
+
+	// Agents whose totalTokens is input+output already include cached tokens
+	// in inputTokens; adding them again would double count.
+	inclusiveRead := 4_000
+	inclusive := (&sessionState{}).tokenUsageForPrompt("other", &acpsdk.Usage{
+		InputTokens:      5_000,
+		OutputTokens:     500,
+		TotalTokens:      5_500,
+		CachedReadTokens: &inclusiveRead,
+	})
+	if inclusive == nil || inclusive.InputTokens != 5_000 {
+		t.Fatalf("inclusive usage = %#v", inclusive)
 	}
 }
 
@@ -391,5 +423,151 @@ func TestConvertEventSuppressesACPTodoWriteToolCards(t *testing.T) {
 				t.Fatalf("event = %#v, want suppressed empty event", event)
 			}
 		})
+	}
+}
+
+func TestACPUsageUpdateCostAttributesTurnDelta(t *testing.T) {
+	state := &sessionState{}
+	state.observeUsageCost(&acpsdk.Cost{Amount: 0.25, Currency: "usd"}, true)
+	state.observeUsageCost(&acpsdk.Cost{Amount: 0.4, Currency: "USD"}, true)
+
+	extras := state.takeTurnExtras()
+	if extras.cost < 0.399 || extras.cost > 0.401 {
+		t.Fatalf("turn cost = %v, want 0.4", extras.cost)
+	}
+	if extras.currency != "USD" {
+		t.Fatalf("currency = %q, want USD", extras.currency)
+	}
+	if next := state.takeTurnExtras(); next.cost != 0 || next.requests != 0 || next.durationMs != 0 {
+		t.Fatalf("extras were not consumed: %#v", next)
+	}
+}
+
+func TestACPUsageUpdateCostCounterResetAttributesFullAmount(t *testing.T) {
+	state := &sessionState{}
+	state.observeUsageCost(&acpsdk.Cost{Amount: 2, Currency: "USD"}, true)
+	state.takeTurnExtras()
+	state.observeUsageCost(&acpsdk.Cost{Amount: 0.3, Currency: "USD"}, true)
+
+	if extras := state.takeTurnExtras(); extras.cost < 0.299 || extras.cost > 0.301 {
+		t.Fatalf("reset delta = %v, want 0.3", extras.cost)
+	}
+}
+
+func TestACPResumeCostBaselineIsNotAttributed(t *testing.T) {
+	state := &sessionState{costBaselineOnly: true}
+	state.observeUsageCost(&acpsdk.Cost{Amount: 12, Currency: "USD"}, true)
+	if extras := state.takeTurnExtras(); extras.cost != 0 {
+		t.Fatalf("history baseline leaked into turn cost: %#v", extras)
+	}
+	state.observeUsageCost(&acpsdk.Cost{Amount: 12.5, Currency: "USD"}, true)
+	if extras := state.takeTurnExtras(); extras.cost < 0.499 || extras.cost > 0.501 {
+		t.Fatalf("turn cost after resume = %v, want 0.5", extras.cost)
+	}
+}
+
+func TestACPTurnUsageMetaAttachesRequestsDurationAndCost(t *testing.T) {
+	state := &sessionState{}
+	meta := map[string]any{
+		"omp.turnUsage": map[string]any{
+			"requests":   float64(3),
+			"durationMs": 46515.10949999979,
+			"cost":       0.02,
+			"currency":   "usd",
+		},
+	}
+	parsed, ok := turnUsageFromMeta(meta)
+	if !ok {
+		t.Fatal("turn usage meta was not parsed")
+	}
+	// Meta already carries the exact turn cost, so the cumulative snapshot is
+	// only a baseline.
+	state.observeUsageCost(&acpsdk.Cost{Amount: 9, Currency: "USD"}, false)
+	state.addTurnUsageMeta(parsed)
+
+	usage := attachTurnExtras(nil, state.takeTurnExtras())
+	if usage == nil {
+		t.Fatal("usage = nil, want requests/duration/cost")
+	}
+	if usage.Requests != 3 {
+		t.Fatalf("requests = %d, want 3", usage.Requests)
+	}
+	if usage.DurationMs == nil || *usage.DurationMs != 46_515 {
+		t.Fatalf("duration = %#v, want 46515", usage.DurationMs)
+	}
+	if usage.CostAmount == nil || *usage.CostAmount != 0.02 || usage.CostCurrency != "USD" {
+		t.Fatalf("cost = %#v %q, want 0.02 USD", usage.CostAmount, usage.CostCurrency)
+	}
+}
+
+func TestACPTurnUsageMetaParsesRealOMPUsageUpdate(t *testing.T) {
+	// Captured from OMP 18.13.1: durationMs is fractional, so an int64 field
+	// rejected the payload and silently dropped requests and cost.
+	raw := []byte(`{"_meta":{"omp.turnUsage":{"cost":0.04251203749999999,"currency":"USD","durationMs":46515.10949999979,"requests":3}},"cost":{"amount":0.6292931224999998,"currency":"USD"},"sessionUpdate":"usage_update","size":1000000,"used":359694}`)
+	var update acpsdk.SessionUpdate
+	if err := json.Unmarshal(raw, &update); err != nil {
+		t.Fatalf("decode usage update: %v", err)
+	}
+	if update.UsageUpdate == nil {
+		t.Fatal("usage update variant was not decoded")
+	}
+	meta, ok := turnUsageFromMeta(update.UsageUpdate.Meta)
+	if !ok {
+		t.Fatal("omp.turnUsage was not parsed")
+	}
+	if meta.Requests != 3 {
+		t.Fatalf("requests = %d, want 3", meta.Requests)
+	}
+	if meta.DurationMs < 46_515 || meta.DurationMs > 46_516 {
+		t.Fatalf("duration = %v, want 46515.1", meta.DurationMs)
+	}
+	if meta.Cost < 0.0425 || meta.Cost > 0.0426 || meta.Currency != "USD" {
+		t.Fatalf("cost = %v %q, want 0.0425 USD", meta.Cost, meta.Currency)
+	}
+}
+
+func TestACPUsageNotificationFeedsTurnExtras(t *testing.T) {
+	// Same payload as a live turn: it must reach turn extras through the
+	// notification handler, not only through the meta helper.
+	raw := []byte(`{"_meta":{"omp.turnUsage":{"cost":0.04251203749999999,"currency":"USD","durationMs":46515.10949999979,"requests":3}},"cost":{"amount":0.6292931224999998,"currency":"USD"},"sessionUpdate":"usage_update","size":1000000,"used":359694}`)
+	var update acpsdk.SessionUpdate
+	if err := json.Unmarshal(raw, &update); err != nil {
+		t.Fatalf("decode usage update: %v", err)
+	}
+	state := &sessionState{}
+	proc := &Process{sessionsByID: map[string]*sessionState{"session-1": state}}
+	state.setOnUpdate(func(SessionUpdate) {})
+	client := &mindfsClient{proc: proc}
+	if err := client.SessionUpdate(context.Background(), acpsdk.SessionNotification{
+		SessionId: "session-1",
+		Update:    update,
+	}); err != nil {
+		t.Fatalf("handle usage update: %v", err)
+	}
+
+	usage := attachTurnExtras(&types.TokenUsage{InputTokens: 100, OutputTokens: 10}, state.takeTurnExtras())
+	if usage.Requests != 3 {
+		t.Fatalf("requests = %d, want 3", usage.Requests)
+	}
+	if usage.DurationMs == nil || *usage.DurationMs != 46_515 {
+		t.Fatalf("duration = %#v, want 46515", usage.DurationMs)
+	}
+	if usage.CostAmount == nil || *usage.CostAmount < 0.0425 || *usage.CostAmount > 0.0426 {
+		t.Fatalf("cost = %#v, want 0.0425", usage.CostAmount)
+	}
+	if usage.CostCurrency != "USD" {
+		t.Fatalf("currency = %q, want USD", usage.CostCurrency)
+	}
+}
+
+func TestACPTurnUsageMetaIgnoresUnknownShape(t *testing.T) {
+	for _, meta := range []map[string]any{
+		nil,
+		{"omp.turnUsage": "unexpected"},
+		{"omp.turnUsage": map[string]any{"requests": "three"}},
+	} {
+		if _, ok := turnUsageFromMeta(meta); ok {
+			t.Fatalf("meta %#v should not parse", meta)
+		}
 	}
 }

@@ -406,6 +406,7 @@ func (p *Pool) openSession(ctx context.Context, protocol Protocol, def Definitio
 			Env:             cloneEnv(def.Env),
 			MCPServers:      def.MCPServers,
 			MCPConfigFiles:  def.MCPConfigFiles,
+			DisableMCP:      in.DisableMCP,
 			Cwd:             def.ResolveCwd(in.RootPath),
 			ResumeSessionID: in.AgentSessionID,
 		})

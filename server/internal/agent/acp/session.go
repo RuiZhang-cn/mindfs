@@ -28,6 +28,7 @@ type OpenOptions struct {
 	MCPServers      []types.MCPServer
 	MCPConfigFiles  []string
 	Cwd             string
+	DisableMCP      bool
 	ResumeSessionID string
 }
 
@@ -57,11 +58,11 @@ func (r *Runtime) OpenSession(ctx context.Context, opts OpenOptions) (types.Sess
 	}
 
 	if strings.TrimSpace(opts.ResumeSessionID) != "" {
-		if err := proc.ResumeSession(ctx, opts.SessionKey, opts.ResumeSessionID, opts.Cwd); err != nil {
+		if err := proc.ResumeSession(ctx, opts.SessionKey, opts.ResumeSessionID, opts.Cwd, opts.DisableMCP); err != nil {
 			return nil, err
 		}
 	} else {
-		if err := proc.NewSession(ctx, opts.SessionKey, opts.RootPath); err != nil {
+		if err := proc.NewSession(ctx, opts.SessionKey, opts.RootPath, opts.DisableMCP); err != nil {
 			return nil, err
 		}
 	}

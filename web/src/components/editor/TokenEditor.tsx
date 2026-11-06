@@ -25,6 +25,7 @@ import {
   Spread,
   TextNode,
 } from "lexical";
+import { hasTransferFiles } from "../../services/pasteFiles";
 
 type TokenType = "file" | "skill";
 type CandidateType = TokenType | "slash_command" | "prompt" | "command";
@@ -379,8 +380,7 @@ function getPlainTextFromPasteEvent(event: ClipboardEvent | InputEvent | Keyboar
 }
 
 function pasteEventHasFiles(event: ClipboardEvent | InputEvent | KeyboardEvent): boolean {
-  const dataTransfer = getPasteDataTransfer(event);
-  return Array.from(dataTransfer?.items || []).some((item) => item.kind === "file");
+  return hasTransferFiles(getPasteDataTransfer(event));
 }
 
 function isKeyboardPasteInput(event: InputEvent): boolean {
@@ -866,7 +866,7 @@ const TokenEditor = forwardRef<TokenEditorHandle, TokenEditorProps>(function Tok
                 onFocusChange?.(false);
               }}
               onKeyDown={onKeyDown}
-              onPaste={onPaste}
+              onPasteCapture={onPaste}
               enterKeyHint={enterKeyHint}
               onCompositionStart={onCompositionStart}
               onCompositionEnd={onCompositionEnd}

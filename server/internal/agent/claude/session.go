@@ -2398,16 +2398,37 @@ func claudeTokenUsage(msg claudeagent.ResultMessage) *types.TokenUsage {
 			cacheWriteTokens += max(0, usage.CacheCreationInputTokens)
 		}
 	}
-	if inputTokens == 0 && outputTokens == 0 && cacheReadTokens == 0 && cacheWriteTokens == 0 {
+	hasTokens := inputTokens > 0 || outputTokens > 0 || cacheReadTokens > 0 || cacheWriteTokens > 0
+	if !hasTokens && msg.NumTurns <= 0 && msg.TotalCostUSD <= 0 {
 		return nil
 	}
 	logicalInputTokens := inputTokens + cacheReadTokens + cacheWriteTokens
-	return &types.TokenUsage{
+	usage := &types.TokenUsage{
 		InputTokens:      logicalInputTokens,
 		OutputTokens:     outputTokens,
 		CacheReadTokens:  &cacheReadTokens,
 		CacheWriteTokens: &cacheWriteTokens,
 	}
+	// The result message covers this prompt's whole agentic loop, so NumTurns
+	// is the number of model requests behind the reply.
+	if msg.NumTurns > 0 {
+		usage.Requests = msg.NumTurns
+	}
+	// API time excludes tool execution, which makes it the honest throughput
+	// denominator. Fall back to total duration when the CLI omits it.
+	if msg.DurationAPIMs > 0 {
+		durationMs := msg.DurationAPIMs
+		usage.DurationMs = &durationMs
+	} else if msg.DurationMs > 0 {
+		durationMs := msg.DurationMs
+		usage.DurationMs = &durationMs
+	}
+	if msg.TotalCostUSD > 0 {
+		cost := msg.TotalCostUSD
+		usage.CostAmount = &cost
+		usage.CostCurrency = "USD"
+	}
+	return usage
 }
 
 func (s *session) enqueueTurn(waiter chan error) {

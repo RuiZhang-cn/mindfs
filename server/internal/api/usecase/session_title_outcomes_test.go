@@ -308,6 +308,10 @@ func TestAutomaticNamingUnboundDoesNotPublishOMPOutcome(t *testing.T) {
 	if calls := h.state(t).Calls; len(calls) != 0 {
 		t.Fatalf("unbound naming touched native metadata: %#v", calls)
 	}
+	state := h.state(t)
+	if len(state.SessionNewMCPCounts) != 1 || state.SessionNewMCPCounts[0] != 0 {
+		t.Fatalf("automatic naming connected configured MCP servers: %#v", state.SessionNewMCPCounts)
+	}
 }
 
 func TestSessionTitleDoesNotClaimIndependentMatchingNativeTitle(t *testing.T) {

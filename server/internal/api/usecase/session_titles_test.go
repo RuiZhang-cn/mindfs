@@ -29,14 +29,15 @@ type titleFixtureSession struct {
 }
 
 type titleFixtureState struct {
-	Sessions       map[string]titleFixtureSession   `json:"sessions"`
-	Calls          []agenttypes.SessionTitleRequest `json:"calls"`
-	Unsupported    bool                             `json:"unsupported"`
-	Chat           bool                             `json:"chat,omitempty"`
-	Reply          string                           `json:"reply,omitempty"`
-	RootCwd        string                           `json:"root_cwd"`
-	ListCalls      int                              `json:"list_calls"`
-	ClosedSessions []string                         `json:"closed_sessions"`
+	Sessions            map[string]titleFixtureSession   `json:"sessions"`
+	Calls               []agenttypes.SessionTitleRequest `json:"calls"`
+	Unsupported         bool                             `json:"unsupported"`
+	Chat                bool                             `json:"chat,omitempty"`
+	SessionNewMCPCounts []int                            `json:"session_new_mcp_counts,omitempty"`
+	Reply               string                           `json:"reply,omitempty"`
+	RootCwd             string                           `json:"root_cwd"`
+	ListCalls           int                              `json:"list_calls"`
+	ClosedSessions      []string                         `json:"closed_sessions"`
 }
 
 func TestSessionTitleProtocolFixture(t *testing.T) {
@@ -110,11 +111,13 @@ func TestSessionTitleProtocolFixture(t *testing.T) {
 			switch rpc.Method {
 			case "session/new":
 				var params struct {
-					Cwd string `json:"cwd"`
+					Cwd        string            `json:"cwd"`
+					MCPServers []json.RawMessage `json:"mcpServers"`
 				}
 				if json.Unmarshal(rpc.Params, &params) != nil {
 					os.Exit(8)
 				}
+				state.SessionNewMCPCounts = append(state.SessionNewMCPCounts, len(params.MCPServers))
 				id := "fixture-created"
 				if params.Cwd != state.RootCwd {
 					id = "fixture-naming"
@@ -251,7 +254,7 @@ func newTitleTestHarness(t *testing.T, native map[string]titleFixtureSession) *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	pool := agent.NewPool(agent.Config{Agents: []agent.Definition{{Name: "omp", Protocol: agent.ProtocolACP, Command: executable, Args: []string{"-test.run=^TestSessionTitleProtocolFixture$"}, Env: map[string]string{"MINDFS_TITLE_COORDINATOR_FIXTURE": path}}}})
+	pool := agent.NewPool(agent.Config{Agents: []agent.Definition{{Name: "omp", Protocol: agent.ProtocolACP, Command: executable, Args: []string{"-test.run=^TestSessionTitleProtocolFixture$"}, Env: map[string]string{"MINDFS_TITLE_COORDINATOR_FIXTURE": path}, MCPServers: []agenttypes.MCPServer{{Name: "idea-mcp", Type: "sse", URL: "http://127.0.0.1:64342/sse"}}}}})
 	registry := &titleTestRegistry{commandTestRegistry: &commandTestRegistry{root: root, manager: manager}, pool: pool}
 	h := &titleTestHarness{service: &Service{Registry: registry}, manager: manager, root: root, statePath: path}
 	t.Cleanup(func() {

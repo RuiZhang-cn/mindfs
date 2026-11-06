@@ -1499,6 +1499,7 @@ func sessionNameRunner(ctx context.Context, pool *agent.Pool, rootAbs string, in
 		AgentName:  agentName,
 		Model:      strings.TrimSpace(in.Model),
 		RootPath:   tmpRoot,
+		DisableMCP: true,
 	})
 	if err != nil {
 		return "", err

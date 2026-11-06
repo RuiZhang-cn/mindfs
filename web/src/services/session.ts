@@ -22,6 +22,13 @@ export type TokenUsage = {
   outputTokens: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  /** Model requests the agent made for this turn; absent when unreported. */
+  requests?: number;
+  /** Model/API time for this turn in milliseconds, used for throughput. */
+  durationMs?: number;
+  /** Agent-reported spend for this turn in costCurrency. */
+  costAmount?: number;
+  costCurrency?: string;
 };
 
 const commandTerminalFontSize = 12;

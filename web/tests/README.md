@@ -6,6 +6,15 @@ Run `node --test tests/sidebar-menu.e2e.test.mjs` to exercise the actual FileTre
 
 Configuration migration checks: `node --test tests/config-transfer.test.mjs tests/config-transfer.e2e.test.mjs` verifies archive validation, category defaults, node persistence, failed-import rollback, exclusion of project registrations and preferences, restart reminders, and the import/export dialog at desktop and mobile sizes. The browser fixture uses isolated mocked endpoints; it never imports into a running user's MindFS instance. Android/Harmony file saving and native node synchronization still need physical-device verification.
 
+# File attachment regression
+
+Run `node --test tests/paste-files.test.mjs tests/file-attachments.e2e.test.mjs`.
+The browser fixture mounts the real ActionBar and TokenEditor with isolated mocked
+API endpoints. It covers file-plus-text clipboard precedence before Lexical,
+files-only clipboard payloads, plain-text preservation, native Chromium multi-file
+drops (including zero-byte and extensionless files), and rejection without a project.
+It never sends a message or uploads to a running user's MindFS instance.
+
 # Session virtualization browser regression
 
 Start `npm run dev` in `web`, then open `/tests/session-virtualization.html`.

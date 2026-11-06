@@ -4,6 +4,8 @@ export const DEFAULT_REPLY_INFO_PREFERENCES = {
   agent: true,
   model: true,
   tokens: true,
+  speed: true,
+  cost: true,
   time: true,
   context: true,
 };

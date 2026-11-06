@@ -105,23 +105,36 @@ type ContextWindow struct {
 // TokenUsage is the normalized usage for one agent turn. InputTokens is the
 // logical input size before cache discounts. CacheReadTokens is nil when the
 // backend does not report cache telemetry.
+//
+// Requests, DurationMs, and CostAmount are optional turn-level billing
+// telemetry. They stay zero/nil for backends that do not report them; the
+// reply status line hides each metric it cannot source.
 type TokenUsage struct {
 	InputTokens      int  `json:"inputTokens"`
 	OutputTokens     int  `json:"outputTokens"`
 	CacheReadTokens  *int `json:"cacheReadTokens,omitempty"`
 	CacheWriteTokens *int `json:"cacheWriteTokens,omitempty"`
+	// Requests is the number of model requests the agent made for this turn.
+	Requests int `json:"requests,omitempty"`
+	// DurationMs is the model/API time for this turn, used for throughput.
+	DurationMs *int64 `json:"durationMs,omitempty"`
+	// CostAmount is the agent-reported spend for this turn in CostCurrency.
+	CostAmount   *float64 `json:"costAmount,omitempty"`
+	CostCurrency string   `json:"costCurrency,omitempty"`
 }
 
 type OpenSessionInput struct {
-	SessionKey            string
-	AgentName             string
-	Model                 string
-	Mode                  string
-	Effort                string
-	FastService           string
-	PlanMode              bool
-	Probe                 bool
-	RootPath              string
+	SessionKey  string
+	AgentName   string
+	Model       string
+	Mode        string
+	Effort      string
+	FastService string
+	PlanMode    bool
+	Probe       bool
+	RootPath    string
+	// DisableMCP keeps session-specific metadata or title requests independent of configured MCP servers.
+	DisableMCP            bool
 	DeveloperInstructions string
 	AgentSessionID        string
 	AgentCtxSeq           int

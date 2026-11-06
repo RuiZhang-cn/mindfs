@@ -1,4 +1,5 @@
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import { useSessionStream, type TimelineItem } from "../hooks/useSessionStream";
 import { sessionService, type TodoUpdate } from "../services/session";
@@ -14,7 +15,8 @@ import { reportError } from "../services/error";
 import { copyText } from "../services/clipboard";
 import type { AgentStatus } from "../services/agents";
 import { useI18n, type Locale } from "../i18n";
-import { formatSessionDuration } from "../services/sessionDuration";
+import { formatSessionDuration, sessionElapsedMs } from "../services/sessionDuration";
+import { computeTokensPerSecond, formatCacheHitPercent, formatCostAmount, formatTokensPerSecond } from "../services/replyMetrics";
 import { DEFAULT_REPLY_INFO_PREFERENCES, useReplyInfoPreferences } from "../services/replyInfoPreferences";
 import { ReplyInfoMenu } from "./ReplyInfoMenu";
 import { ForkSessionButton } from "./ForkSessionButton";
@@ -277,6 +279,7 @@ function formatTurnTokenCount(value: number) {
 }
 
 function TurnTokenUsage({ usage, totalUsage }: { usage?: TokenUsage; totalUsage: TokenUsage }) {
+  const { t } = useI18n();
   if (!usage) {
     return null;
   }
@@ -286,14 +289,34 @@ function TurnTokenUsage({ usage, totalUsage }: { usage?: TokenUsage; totalUsage:
     return null;
   }
   const cacheReadReported = Number.isFinite(usage.cacheReadTokens);
+  const cacheWriteReported = Number.isFinite(usage.cacheWriteTokens);
   const cacheReadTokens = Math.max(0, Number(usage.cacheReadTokens || 0));
-  const hitPercent = inputTokens > 0 && cacheReadReported
-    ? Math.round(Math.min(1, cacheReadTokens / inputTokens) * 100)
-    : null;
-  const cacheLabel = hitPercent === null ? "—" : `${hitPercent}%`;
+  const cacheWriteTokens = Math.max(0, Number(usage.cacheWriteTokens || 0));
+  const cacheReported = cacheReadReported || cacheWriteReported;
+  const hitLabel = cacheReported
+    ? formatCacheHitPercent(cacheReadTokens, inputTokens)
+    : "";
+  const parts = [`${t("session.replyInfo.tokensRead")} ${formatTurnTokenCount(inputTokens)}`];
+  if (cacheReported) {
+    parts.push(`${t("session.replyInfo.tokensCacheRead")} ${formatTurnTokenCount(cacheReadTokens)}`);
+    parts.push(`${t("session.replyInfo.tokensCacheWrite")} ${formatTurnTokenCount(cacheWriteTokens)}`);
+  }
+  parts.push(`${t("session.replyInfo.tokensWrite")} ${formatTurnTokenCount(outputTokens)}`);
+  if (hitLabel) {
+    parts.push(`${t("session.replyInfo.tokensCacheHit")} ${hitLabel}`);
+  }
+  const title = t("session.replyInfo.tokensTitle", {
+    read: formatTurnTokenCount(inputTokens),
+    cacheRead: cacheReported ? formatTurnTokenCount(cacheReadTokens) : "—",
+    cacheWrite: cacheReported ? formatTurnTokenCount(cacheWriteTokens) : "—",
+    write: formatTurnTokenCount(outputTokens),
+    hit: hitLabel || "—",
+    sumRead: formatTurnTokenCount(totalUsage.inputTokens),
+    sumWrite: formatTurnTokenCount(totalUsage.outputTokens),
+  });
   return (
     <span
-      title={`${inputTokens}(♻${cacheLabel}·Σ${totalUsage.inputTokens})→${outputTokens}(Σ${totalUsage.outputTokens})`}
+      title={title}
       style={{
         display: "inline-flex",
         alignItems: "baseline",
@@ -302,15 +325,177 @@ function TurnTokenUsage({ usage, totalUsage }: { usage?: TokenUsage; totalUsage:
         fontVariantNumeric: "tabular-nums",
       }}
     >
-      <span>{formatTurnTokenCount(inputTokens)}</span>
-      <span>
-        {`(♻${cacheLabel}·Σ${formatTurnTokenCount(totalUsage.inputTokens)})`}
-      </span>
-      <span>→</span>
-      <span>{formatTurnTokenCount(outputTokens)}</span>
-      <span>{`(Σ${formatTurnTokenCount(totalUsage.outputTokens)})`}</span>
+      {parts.join(" · ")}
     </span>
   );
+}
+
+function formatUsageDuration(ms: number) {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return "";
+  }
+  if (ms < 1000) {
+    return `${Math.round(ms)} ms`;
+  }
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
+/**
+ * Tap target for the full per-turn usage breakdown. Tooltips are useless on
+ * touch devices, so the numbers that do not fit the status line live here.
+ */
+function UsageDetailButton({ usage, totalUsage }: { usage?: TokenUsage; totalUsage: TokenUsage }) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ top: 0, left: 0 });
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const button = buttonRef.current?.getBoundingClientRect();
+      const panel = panelRef.current?.getBoundingClientRect();
+      if (!button || !panel) return;
+      const top = button.top >= panel.height + 8
+        ? button.top - panel.height - 6
+        : Math.min(button.bottom + 6, window.innerHeight - panel.height - 8);
+      const left = Math.max(8, Math.min(button.right - panel.width, window.innerWidth - panel.width - 8));
+      setPosition(previous => previous.top === top && previous.left === left ? previous : { top: Math.max(8, top), left });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!panelRef.current?.contains(event.target as Node) && !buttonRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        setOpen(false);
+        buttonRef.current?.focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [open]);
+
+  if (!usage) {
+    return null;
+  }
+  const inputTokens = Math.max(0, Number(usage.inputTokens || 0));
+  const outputTokens = Math.max(0, Number(usage.outputTokens || 0));
+  if (!inputTokens && !outputTokens) {
+    return null;
+  }
+  const cacheReported = Number.isFinite(usage.cacheReadTokens) || Number.isFinite(usage.cacheWriteTokens);
+  const cacheReadTokens = Math.max(0, Number(usage.cacheReadTokens || 0));
+  const cacheWriteTokens = Math.max(0, Number(usage.cacheWriteTokens || 0));
+  const freshInput = cacheReported
+    ? Math.max(0, inputTokens - cacheReadTokens - cacheWriteTokens)
+    : inputTokens;
+  const hitLabel = cacheReported ? formatCacheHitPercent(cacheReadTokens, inputTokens) : "";
+  const requests = Math.max(0, Math.round(Number(usage.requests || 0)));
+  const costLabel = formatCostAmount(usage.costAmount, usage.costCurrency);
+  const duration = Number(usage.durationMs || 0);
+  const rows: Array<[string, string]> = [
+    [t("session.replyInfo.usageRead"), formatTurnTokenCount(inputTokens)],
+    [t("session.replyInfo.usageFresh"), formatTurnTokenCount(freshInput)],
+    [t("session.replyInfo.usageCacheRead"), cacheReported ? formatTurnTokenCount(cacheReadTokens) : "—"],
+    [t("session.replyInfo.usageCacheWrite"), cacheReported ? formatTurnTokenCount(cacheWriteTokens) : "—"],
+    [t("session.replyInfo.usageWrite"), formatTurnTokenCount(outputTokens)],
+    [t("session.replyInfo.usageCacheHit"), hitLabel || "—"],
+    [t("session.replyInfo.usageRequests"), requests > 0 ? String(requests) : "—"],
+    [t("session.replyInfo.usageCost"), costLabel || "—"],
+    [t("session.replyInfo.usageDuration"), formatUsageDuration(duration) || "—"],
+    [
+      t("session.replyInfo.usageTotal"),
+      `${formatTurnTokenCount(totalUsage.inputTokens)} / ${formatTurnTokenCount(totalUsage.outputTokens)}`,
+    ],
+  ];
+  const label = t("session.replyInfo.usageDetail");
+  return <>
+    <button
+      ref={buttonRef}
+      type="button"
+      aria-label={label}
+      aria-expanded={open}
+      title={label}
+      onClick={() => setOpen(value => !value)}
+      style={{
+        border: 0,
+        background: "transparent",
+        color: "inherit",
+        padding: "0 2px",
+        minHeight: "16px",
+        display: "inline-flex",
+        alignItems: "center",
+        fontSize: "10px",
+        lineHeight: 1,
+        cursor: "pointer",
+        textDecoration: "underline dotted",
+        textUnderlineOffset: "2px",
+        flexShrink: 0,
+      }}
+    >
+      {label}
+    </button>
+    {open && createPortal(
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-label={t("session.replyInfo.usageTitle")}
+        style={{
+          position: "fixed",
+          ...position,
+          zIndex: 10000,
+          width: 252,
+          maxWidth: "calc(100vw - 16px)",
+          maxHeight: "calc(100dvh - 16px)",
+          overflowY: "auto",
+          boxSizing: "border-box",
+          padding: "10px 12px",
+          borderRadius: 10,
+          border: "1px solid var(--border-color)",
+          background: "var(--menu-bg)",
+          color: "var(--text-primary)",
+          boxShadow: "0 12px 30px rgba(15, 23, 42, 0.18)",
+          fontSize: 12,
+        }}
+      >
+        <div style={{ fontWeight: 600, marginBottom: 6 }}>
+          {t("session.replyInfo.usageTitle")}
+        </div>
+        {rows.map(([rowLabel, value]) => (
+          <div
+            key={rowLabel}
+            style={{ display: "flex", justifyContent: "space-between", gap: 12, lineHeight: "20px" }}
+          >
+            <span style={{ color: "var(--text-secondary)" }}>{rowLabel}</span>
+            <span style={{ fontVariantNumeric: "tabular-nums", textAlign: "right" }}>{value}</span>
+          </div>
+        ))}
+        <div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.4, color: "var(--text-secondary)" }}>
+          {t("session.replyInfo.usageReadHint")}
+        </div>
+      </div>,
+      document.body,
+    )}
+  </>;
 }
 
 function modelDisplayName(
@@ -1948,6 +2133,24 @@ function SessionViewerInner({
     const assistantDurationLabel = !isUser
       ? formatSessionDuration(timelineNavigation.rows[idx].previousUserTime, item.timestamp)
       : "";
+    const assistantOutputTokens = !isUser
+      ? Math.max(0, Number(item.tokenUsage?.outputTokens || 0))
+      : 0;
+    const reportedDurationMs = Number(item.tokenUsage?.durationMs);
+    const assistantSpeedDurationMs = !isUser
+      ? Number.isFinite(reportedDurationMs) && reportedDurationMs > 0
+        ? reportedDurationMs
+        : sessionElapsedMs(timelineNavigation.rows[idx].previousUserTime, item.timestamp)
+      : null;
+    const assistantTokensPerSecond = !isUser
+      ? computeTokensPerSecond(assistantOutputTokens, assistantSpeedDurationMs)
+      : null;
+    const assistantRequests = !isUser
+      ? Math.max(0, Math.round(Number(item.tokenUsage?.requests || 0)))
+      : 0;
+    const assistantCostLabel = !isUser
+      ? formatCostAmount(item.tokenUsage?.costAmount, item.tokenUsage?.costCurrency)
+      : "";
     const canForkAgentMessage = !isUser && Number(item.seq || 0) > 0 && !!onForkAgentMessage;
     const canEditInPlace = isUser && idx === latestUserIndex && !item.pendingAck && !!item.timestamp && session?.type === "chat" && !(session as any)?.closed_at;
     const isEditing = isUser && editingMessage?.timestamp === item.timestamp && editingMessage?.original === item.content;
@@ -2439,6 +2642,41 @@ function SessionViewerInner({
                   >
                     <TurnTokenUsage usage={item.tokenUsage} totalUsage={cumulativeTokenUsage[idx]} />
                   </span>}
+                  {visibleReplyInfo.speed && assistantTokensPerSecond !== null && <span
+                    title={t("session.replyInfo.speedTitle")}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      minHeight: "16px",
+                      minWidth: 0,
+                      maxWidth: "100%",
+                      fontVariantNumeric: "tabular-nums",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {formatTokensPerSecond(assistantTokensPerSecond)}
+                  </span>}
+                  {visibleReplyInfo.cost && (assistantRequests > 0 || assistantCostLabel) && <span
+                    title={t("session.replyInfo.costTitle")}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      minHeight: "16px",
+                      minWidth: 0,
+                      maxWidth: "100%",
+                      fontVariantNumeric: "tabular-nums",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {[
+                      assistantRequests > 0 ? `${assistantRequests} req` : "",
+                      assistantCostLabel || (assistantRequests > 0 ? "—" : ""),
+                    ].filter(Boolean).join(" · ")}
+                  </span>}
+                  {visibleReplyInfo.tokens && item.tokenUsage && <UsageDetailButton
+                    usage={item.tokenUsage}
+                    totalUsage={cumulativeTokenUsage[idx]}
+                  />}
                   {visibleReplyInfo.time && <span
                     style={{
                       display: "inline-flex",

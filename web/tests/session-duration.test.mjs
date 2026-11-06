@@ -19,7 +19,22 @@ const sandbox = {
 };
 vm.runInNewContext(compiled, sandbox, { filename: sourcePath });
 
-const { formatSessionDuration } = sandbox.exports;
+const { formatSessionDuration, sessionElapsedMs } = sandbox.exports;
+
+assert.equal(
+  sessionElapsedMs("2026-07-29T10:00:00.000Z", "2026-07-29T10:00:33.000Z"),
+  33_000,
+);
+assert.equal(
+  sessionElapsedMs("2026-07-29T10:00:00.000Z", "2026-07-29T10:00:00.500Z"),
+  500,
+);
+assert.equal(sessionElapsedMs("", "2026-07-29T10:00:33.000Z"), null);
+assert.equal(sessionElapsedMs("bad", "2026-07-29T10:00:33.000Z"), null);
+assert.equal(
+  sessionElapsedMs("2026-07-29T10:00:33.000Z", "2026-07-29T10:00:00.000Z"),
+  null,
+);
 
 assert.equal(
   formatSessionDuration("2026-07-29T10:00:00.000Z", "2026-07-29T10:00:33.000Z"),

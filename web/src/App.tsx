@@ -12,6 +12,7 @@ import React, {
 } from "react";
 import { resolveInputSession } from "./services/inputSession";
 import { useProjectSessionView } from "./hooks/useProjectSessionView";
+import { useFileDrop } from "./hooks/useFileDrop";
 import { FileEditStore, fileEditKey } from "./services/fileEditing";
 import { normalizePathForRoot, shouldRedirectToRelayNodes } from "./services/fileNavigation";
 import { getViewModeSystemPrompt } from "./renderer/viewCatalog";
@@ -209,6 +210,7 @@ import {
 } from "./services/tasks";
 import { shouldApplyTaskDetail } from "./services/taskDetailOrder";
 import { mergeRelatedFileGroups, taskIdsForUpdatedSession } from "./services/taskRelatedFiles";
+import { collectPastedFiles, normalizePastedFiles } from "./services/pasteFiles";
 import { useI18n, type MessageKey, type MessageParams } from "./i18n";
 import {
   completeOnboarding,
@@ -2235,6 +2237,11 @@ export function App({ onGoHome }: AppProps) {
     });
   }, []);
 
+  const { isDragging: taskInlineDraggingFiles, dropHandlers: taskInlineFileDropHandlers } = useFileDrop({
+    disabled: taskInlineSaving || !currentRootId || !taskInlineEdit,
+    onFiles: appendTaskInlineAttachments,
+  });
+
   const handleTaskInlineAttachmentChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []);
     if (files.length > 0) {
@@ -2245,14 +2252,12 @@ export function App({ onGoHome }: AppProps) {
 
   const handleTaskInlinePaste = useCallback((event: React.ClipboardEvent<HTMLDivElement>) => {
     if (taskInlineSaving || !currentRootIdRef.current) return;
-    const clipboardItems = Array.from(event.clipboardData?.items || []);
-    const imageFiles = clipboardItems
-      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => !!file);
-    if (imageFiles.length === 0) return;
+    const pastedFiles = collectPastedFiles(event.clipboardData);
+    if (pastedFiles.length === 0) return;
+    // 任务内联编辑同样接受微信/资源管理器给出的文件剪贴板。
     event.preventDefault();
-    appendTaskInlineAttachments(imageFiles);
+    event.stopPropagation();
+    void normalizePastedFiles(pastedFiles).then(appendTaskInlineAttachments);
   }, [appendTaskInlineAttachments, taskInlineSaving]);
 
   const removeTaskInlineAttachment = useCallback((id: string) => {
@@ -4646,6 +4651,18 @@ export function App({ onGoHome }: AppProps) {
               : {}),
             ...(Number.isFinite(tokenUsage.cacheWriteTokens)
               ? { cacheWriteTokens: Math.max(0, Number(tokenUsage.cacheWriteTokens)) }
+              : {}),
+            ...(Number.isFinite(tokenUsage.requests)
+              ? { requests: Math.max(0, Math.round(Number(tokenUsage.requests))) }
+              : {}),
+            ...(Number.isFinite(tokenUsage.durationMs)
+              ? { durationMs: Math.max(0, Number(tokenUsage.durationMs)) }
+              : {}),
+            ...(Number.isFinite(tokenUsage.costAmount)
+              ? { costAmount: Math.max(0, Number(tokenUsage.costAmount)) }
+              : {}),
+            ...(typeof tokenUsage.costCurrency === "string" && tokenUsage.costCurrency.trim()
+              ? { costCurrency: tokenUsage.costCurrency.trim() }
               : {}),
           }
         : undefined;
@@ -15309,7 +15326,12 @@ export function App({ onGoHome }: AppProps) {
           }}
         >
           <section
+            className="mindfs-file-drop-zone"
+            data-file-drop-active={taskInlineDraggingFiles || undefined}
+            data-file-drop-label={t("action.dropFiles")}
+            {...taskInlineFileDropHandlers}
             style={{
+              position: "relative",
               width: isMobile ? "100%" : "min(640px, 100%)",
               maxHeight: isMobile ? "70dvh" : "82vh",
               borderRadius: "10px",
